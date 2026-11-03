@@ -63,12 +63,43 @@ def find_tool(tool_name):
     raise FileNotFoundError(f"Could not locate '{tool_name}'. Ensure Icarus Verilog is installed.")
 
 def clean_code_block(text: str) -> str:
-    """Extract code from markdown code fences or return raw text."""
+    """Extract code from markdown code fences and sanitize invalid literals."""
     pattern = r"```(?:verilog|systemverilog)?\s*(.*?)\s*```"
     match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
+    code = match.group(1).strip() if match else text.strip()
+
+    # Sanitize invalid binary literals like 2'b03 or 2'b2 -> 2'd3 or 2'd2
+    def fix_binary_literal(m):
+        width, digits = m.group(1), m.group(2)
+        if all(c in '01xzXZ_' for c in digits):
+            return m.group(0)
+        return f"{width}'d{int(digits)}"
+
+    code = re.sub(r"(\d+)'b([0-9]+)", fix_binary_literal, code)
+    return code
+
+def generate_with_fallback(prompt: str, preferred_model: str = "gemini-3.5-flash-lite"):
+    """Call Gemini API with automatic fallback across free-tier models on quota limits."""
+    import google.generativeai as genai
+    model_candidates = [preferred_model, "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash"]
+    unique_models = []
+    for m in model_candidates:
+        if m not in unique_models:
+            unique_models.append(m)
+
+    last_error = None
+    for m in unique_models:
+        try:
+            model = genai.GenerativeModel(m)
+            return model.generate_content(prompt)
+        except Exception as e:
+            err_str = str(e)
+            if "ResourceExhausted" in err_str or "429" in err_str or "quota" in err_str.lower():
+                print(f"[!] Quota limit reached on {m}. Falling back to next available model...")
+                last_error = e
+                continue
+            raise e
+    raise last_error
 
 def extract_corrected_code(analysis_text: str) -> str:
     """Extract full corrected Verilog code from Gemini's response."""
@@ -77,7 +108,7 @@ def extract_corrected_code(analysis_text: str) -> str:
         return blocks[-1].strip()
     return ""
 
-def run_pipeline(dut_path: Path, model, auto_heal: bool, max_retries: int = 2):
+def run_pipeline(dut_path: Path, model_name: str = "gemini-3.5-flash-lite", auto_heal: bool = False, max_retries: int = 2):
     module_name = dut_path.stem
     tb_path = TB_DIR / f"tb_{module_name}.v"
     sim_bin = LOGS_DIR / f"{module_name}_sim.vvp"
@@ -117,6 +148,7 @@ Requirements for the testbench:
    - Use only standard `reg`, `wire`, and `integer`.
    - Declare internal test variables at the module level or at the top of initial blocks.
    - For random values, use `$random` or `$urandom`.
+   - Ensure all binary literals ('b) contain only 0 and 1 (use 2'b11 or 2'd3, never 2'b03).
 2. Instantiate the DUT with instance name `dut`.
 3. Include a clock generator (`always #5 clk = ~clk;`) and proper synchronous active-low reset initialization if sequential.
 4. Comprehensive test scenarios:
@@ -137,7 +169,7 @@ Requirements for the testbench:
 8. Output ONLY the Verilog code enclosed within a single ```verilog ``` markdown block.
 """
 
-    response = model.generate_content(prompt)
+    response = generate_with_fallback(prompt, preferred_model=model_name)
     tb_code = clean_code_block(response.text)
 
     with open(tb_path, "w", encoding="utf-8") as f:
@@ -163,7 +195,7 @@ Please fix the testbench for Icarus Verilog:
 - Ensure all variable declarations in tasks and functions are at the VERY BEGINNING of the task/function block before any statements.
 - Return ONLY the complete corrected Verilog code in a ```verilog ``` block.
 """
-        fixed_resp = model.generate_content(fix_tb_prompt)
+        fixed_resp = generate_with_fallback(fix_tb_prompt, preferred_model=model_name)
         tb_code = clean_code_block(fixed_resp.text)
         with open(tb_path, "w", encoding="utf-8") as f:
             f.write(tb_code)
@@ -203,7 +235,7 @@ Please fix the testbench:
 - Ensure all variable declarations are at the top of tasks/functions.
 - Return ONLY the corrected Verilog code in a ```verilog ``` block.
 """
-        fixed_resp = model.generate_content(fix_prompt)
+        fixed_resp = generate_with_fallback(fix_prompt, preferred_model=model_name)
         tb_code = clean_code_block(fixed_resp.text)
         with open(tb_path, "w", encoding="utf-8") as f:
             f.write(tb_code)
@@ -249,7 +281,7 @@ Please provide a structured report with:
 5. Corrected RTL Code: Provide the COMPLETE, bug-free `{dut_path.name}` enclosed in a ```verilog ``` block so it can be automatically applied.
 """
 
-    analysis_response = model.generate_content(analysis_prompt)
+    analysis_response = generate_with_fallback(analysis_prompt, preferred_model=model_name)
     report_text = analysis_response.text
 
     with open(report_file, "w", encoding="utf-8") as f:
@@ -273,17 +305,138 @@ Please provide a structured report with:
             with open(dut_path, "w", encoding="utf-8") as f:
                 f.write(fixed_code)
             print(f"[SELF-HEALING] Applied fix to {dut_path.name}. Re-running verification...")
-            return run_pipeline(dut_path, model, auto_heal=False, max_retries=max_retries-1)
+            return run_pipeline(dut_path, model_name=model_name, auto_heal=False, max_retries=max_retries-1)
         else:
             print("[SELF-HEALING] Could not extract complete corrected RTL module. Manual review recommended.")
 
     return False
 
+def generate_dashboard(results: list):
+    """Generate HTML and Markdown regression summary dashboards."""
+    md_file = LOGS_DIR / "regression_dashboard.md"
+    html_file = LOGS_DIR / "regression_dashboard.html"
+
+    total = len(results)
+    passed = sum(1 for r in results if r["status"] == "PASSED")
+    failed = total - passed
+    pass_rate = (passed / total * 100) if total > 0 else 0
+
+    # Markdown Dashboard
+    md_content = f"""# AutoVerify-VLSI: Regression Summary Dashboard
+
+**Overall Status**: {'🟢 ALL PASSED' if failed == 0 else '🔴 FAILURES DETECTED'}  
+**Modules Tested**: {total} | **Passed**: {passed} | **Failed**: {failed} | **Pass Rate**: {pass_rate:.1f}%
+
+| Module | Status | Errors | VCD Waveform | Diagnostics |
+| :--- | :---: | :---: | :--- | :--- |
+"""
+    for r in results:
+        status_badge = "✅ PASSED" if r["status"] == "PASSED" else "❌ FAILED"
+        vcd_link = f"[`{r['module']}.vcd`](file:///{r['vcd'].as_posix()})" if r['vcd'].exists() else "N/A"
+        diag_link = f"[`Report`](file:///{r['report'].as_posix()})" if r['report'].exists() else "N/A"
+        md_content += f"| **{r['module']}** | {status_badge} | {r['errors']} | {vcd_link} | {diag_link} |\n"
+
+    with open(md_file, "w", encoding="utf-8") as f:
+        f.write(md_content)
+
+    # HTML Dashboard
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>AutoVerify-VLSI Regression Dashboard</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 40px; }}
+  .container {{ max-width: 900px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 30px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }}
+  h1 {{ margin-top: 0; color: #38bdf8; font-size: 28px; }}
+  .stats {{ display: flex; gap: 20px; margin: 25px 0; }}
+  .stat-card {{ background: #334155; padding: 15px 25px; border-radius: 8px; flex: 1; text-align: center; }}
+  .stat-value {{ font-size: 28px; font-weight: bold; margin-bottom: 5px; }}
+  .stat-label {{ color: #94a3b8; font-size: 14px; text-transform: uppercase; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+  th, td {{ padding: 12px 16px; text-align: left; border-bottom: 1px solid #475569; }}
+  th {{ background: #0f172a; color: #cbd5e1; font-size: 14px; }}
+  .badge-pass {{ background: #166534; color: #bbf7d0; padding: 4px 10px; border-radius: 9999px; font-size: 12px; font-weight: 600; display: inline-block; }}
+  .badge-fail {{ background: #991b1b; color: #fecaca; padding: 4px 10px; border-radius: 9999px; font-size: 12px; font-weight: 600; display: inline-block; }}
+  a {{ color: #38bdf8; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>AutoVerify-VLSI: Regression Dashboard</h1>
+  <div class="stats">
+    <div class="stat-card"><div class="stat-value" style="color: #38bdf8;">{total}</div><div class="stat-label">Total Modules</div></div>
+    <div class="stat-card"><div class="stat-value" style="color: #4ade80;">{passed}</div><div class="stat-label">Passed</div></div>
+    <div class="stat-card"><div class="stat-value" style="color: #f87171;">{failed}</div><div class="stat-label">Failed</div></div>
+    <div class="stat-card"><div class="stat-value" style="color: #fbbf24;">{pass_rate:.1f}%</div><div class="stat-label">Pass Rate</div></div>
+  </div>
+  <table>
+    <thead><tr><th>Module</th><th>Status</th><th>Errors</th><th>Waveforms</th><th>Diagnostics</th></tr></thead>
+    <tbody>
+"""
+    for r in results:
+        badge = '<span class="badge-pass">PASSED</span>' if r["status"] == "PASSED" else '<span class="badge-fail">FAILED</span>'
+        vcd_str = f'<a href="file:///{r["vcd"].as_posix()}">{r["module"]}.vcd</a>' if r['vcd'].exists() else "N/A"
+        diag_str = f'<a href="file:///{r["report"].as_posix()}">Report</a>' if r['report'].exists() else "N/A"
+        html_content += f'<tr><td><strong>{r["module"]}</strong></td><td>{badge}</td><td>{r["errors"]}</td><td>{vcd_str}</td><td>{diag_str}</td></tr>\n'
+
+    html_content += """    </tbody>
+  </table>
+</div>
+</body>
+</html>"""
+
+    with open(html_file, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    print(f"\n[DASHBOARD] Generated Regression Dashboard:")
+    print(f"  Markdown: {md_file}")
+    print(f"  HTML:     {html_file}")
+
+def run_regression(model_name: str, auto_heal: bool):
+    """Run full verification regression suite across all DUTs in dut/."""
+    dut_files = sorted(list(DUT_DIR.glob("*.v")))
+    if not dut_files:
+        print(f"[ERROR] No Verilog files found in {DUT_DIR}")
+        return
+
+    print("\n" + "=" * 65)
+    print(f" STARTING REGRESSION SUITE ({len(dut_files)} Modules Found) ")
+    print("=" * 65)
+
+    results = []
+    for dut in dut_files:
+        module_name = dut.stem
+        passed = run_pipeline(dut, model_name=model_name, auto_heal=auto_heal)
+        
+        sim_log = LOGS_DIR / f"{module_name}_sim.log"
+        error_count = 0
+        if sim_log.exists():
+            with open(sim_log, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                matches = re.findall(r"Total Errors\s*=\s*(\d+)", content)
+                if matches:
+                    error_count = int(matches[-1])
+                elif not passed:
+                    error_count = len(re.findall(r"\[FAIL\]", content)) or 1
+
+        results.append({
+            "module": module_name,
+            "status": "PASSED" if passed else "FAILED",
+            "errors": error_count,
+            "vcd": LOGS_DIR / f"{module_name}.vcd",
+            "report": LOGS_DIR / f"{module_name}_report.md"
+        })
+
+    generate_dashboard(results)
+
 def main():
     parser = argparse.ArgumentParser(description="AutoVerify-VLSI: Autonomous RTL Verification & Self-Healing Agent")
-    parser.add_argument("--dut", type=str, default="dut/sync_fifo.v", help="Path to DUT Verilog file (default: dut/sync_fifo.v)")
+    parser.add_argument("--dut", type=str, default="dut/alu.v", help="Path to DUT Verilog file (default: dut/alu.v)")
+    parser.add_argument("--regression", action="store_true", help="Run full regression on all modules in dut/")
     parser.add_argument("--auto-heal", action="store_true", help="Automatically patch RTL with Gemini's fix and re-verify")
-    parser.add_argument("--model", type=str, default="gemini-2.5-flash", help="Gemini model name")
+    parser.add_argument("--model", type=str, default="gemini-3.5-flash-lite", help="Gemini model name")
     args = parser.parse_args()
 
     api_key = get_api_key()
@@ -296,6 +449,10 @@ def main():
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(args.model)
 
+    if args.regression:
+        run_regression(args.model, auto_heal=args.auto_heal)
+        return
+
     dut_path = Path(args.dut)
     if not dut_path.is_absolute():
         dut_path = ROOT_DIR / dut_path
@@ -304,7 +461,7 @@ def main():
         print(f"[ERROR] DUT file not found: {dut_path}")
         sys.exit(1)
 
-    run_pipeline(dut_path, model, auto_heal=args.auto_heal)
+    run_pipeline(dut_path, model_name=args.model, auto_heal=args.auto_heal)
 
 if __name__ == "__main__":
     main()

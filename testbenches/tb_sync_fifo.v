@@ -1,51 +1,46 @@
 `timescale 1ns / 1ps
 
-// Testbench for sync_fifo
 module tb_sync_fifo;
 
-    // DUT Parameters
+    // Testbench parameters - match DUT parameters for instantiation
     localparam DATA_WIDTH = 8;
     localparam DEPTH      = 16;
-    localparam ADDR_WIDTH = $clog2(DEPTH); // For DEPTH=16, ADDR_WIDTH=4
+    localparam ADDR_WIDTH = $clog2(DEPTH); // For internal pointers and sizing
 
-    // Testbench Control Signals (inputs to DUT)
-    reg                   clk;
-    reg                   rst_n;
-    reg                   wr_en;
-    reg  [DATA_WIDTH-1:0] din;
-    reg                   rd_en;
-
-    // DUT Outputs (wires connected to DUT)
+    // DUT signals
+    reg                  clk;
+    reg                  rst_n;
+    reg                  wr_en;
+    reg [DATA_WIDTH-1:0] din;
+    reg                  rd_en;
     wire [DATA_WIDTH-1:0] dout;
     wire                  full;
     wire                  empty;
     wire                  overflow;
     wire                  underflow;
-    wire [ADDR_WIDTH:0]   count; // count is ADDR_WIDTH+1 bits wide, e.g., [4:0] for DEPTH=16
+    wire [$clog2(DEPTH):0] count;
 
-    // Testbench Variables and Reference Model
-    integer               error_count;
-    integer               i;           // Loop counter
-    integer               test_idx;    // Test case index
-    integer               max_cycles;  // For random test loop
-    integer               random_op;   // For random test operation selection
+    // Internal testbench variables
+    integer error_count;
+    integer i, j; // Loop variables
 
-    // Reference model for FIFO
-    reg [DATA_WIDTH-1:0] ref_mem [0:DEPTH-1];
-    reg [ADDR_WIDTH-1:0] ref_wr_ptr;
-    reg [ADDR_WIDTH-1:0] ref_rd_ptr;
-    reg [$clog2(DEPTH):0] ref_count; // ADDR_WIDTH+1 bits
-    reg                  ref_full;
-    reg                  ref_empty;
-    reg                  ref_overflow;
-    reg                  ref_underflow;
-    reg [DATA_WIDTH-1:0] ref_dout;
-    reg                  ref_rst_n; // Internal reset state for reference model
+    // Reference model for self-checking (implements correct FIFO behavior)
+    reg [DATA_WIDTH-1:0] ref_fifo_mem [0:DEPTH-1]; // Simulates internal FIFO memory
+    reg [ADDR_WIDTH-1:0] ref_wr_ptr_tb;            // Reference write pointer
+    reg [ADDR_WIDTH-1:0] ref_rd_ptr_tb;            // Reference read pointer
+    reg [$clog2(DEPTH):0] ref_count_tb;            // Reference fill level
 
-    // Clock Generation
-    always #5 clk = ~clk;
+    // Expected values for comparison with DUT outputs
+    // These 'expected_' registers hold the values that the DUT *should* output
+    // in the current cycle, as predicted by the reference model.
+    reg [DATA_WIDTH-1:0] expected_dout;
+    reg                  expected_full;
+    reg                  expected_empty;
+    reg                  expected_overflow;
+    reg                  expected_underflow;
+    reg [$clog2(DEPTH):0] expected_count;
 
-    // DUT Instantiation
+    // Instantiate the Design Under Test (DUT)
     sync_fifo #(
         .DATA_WIDTH(DATA_WIDTH),
         .DEPTH(DEPTH)
@@ -63,461 +58,413 @@ module tb_sync_fifo;
         .count(count)
     );
 
-    // --- Helper Tasks ---
+    // Clock generator: 10ns period (5ns high, 5ns low)
+    always #5 clk = ~clk;
 
-    // Task to apply reset to DUT and reference model
-    task reset_fifo;
+    // --------------------------------------------------------------------
+    // Reference Model Logic: Predicts DUT outputs based on CORRECT behavior
+    // This block runs synchronously with the DUT and updates expected values.
+    // --------------------------------------------------------------------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            // Reset reference model state
+            ref_wr_ptr_tb      <= {ADDR_WIDTH{1'b0}};
+            ref_rd_ptr_tb      <= {ADDR_WIDTH{1'b0}};
+            ref_count_tb       <= 0;
+            expected_dout      <= {DATA_WIDTH{1'b0}}; // Default output value
+            expected_overflow  <= 1'b0;
+            expected_underflow <= 1'b0;
+            for (i=0; i<DEPTH; i=i+1) begin
+                ref_fifo_mem[i] <= {DATA_WIDTH{1'b0}}; // Initialize reference memory
+            end
+            expected_full      = 1'b0; // Initial state: not full
+            expected_empty     = 1'b1; // Initial state: empty
+            expected_count     = 0;
+        end else begin
+            // Update combinational flags based on current ref_count_tb state
+            // These are used for logic in this cycle, and for checking `full`/`empty` wires.
+            expected_full  = (ref_count_tb == DEPTH);
+            expected_empty = (ref_count_tb == 0);
+
+            // Reset anticipated error flags for this cycle before re-evaluating
+            expected_overflow  <= 1'b0;
+            expected_underflow <= 1'b0;
+
+            // `expected_dout` holds its previous value unless an explicit read occurs.
+            // If `dout` is not updated by a read, it should remain the last valid value.
+
+            case ({wr_en, rd_en})
+                2'b10: begin // Write only
+                    if (!expected_full) begin
+                        ref_fifo_mem[ref_wr_ptr_tb] <= din;
+                        ref_wr_ptr_tb               <= ref_wr_ptr_tb + 1'b1;
+                        ref_count_tb                <= ref_count_tb + 1'b1;
+                    end else begin
+                        expected_overflow           <= 1'b1; // Trigger overflow
+                    end
+                end
+
+                2'b01: begin // Read only
+                    if (!expected_empty) begin
+                        expected_dout               <= ref_fifo_mem[ref_rd_ptr_tb]; // Output data
+                        ref_rd_ptr_tb               <= ref_rd_ptr_tb + 1'b1;
+                        ref_count_tb                <= ref_count_tb - 1'b1;
+                    end else begin
+                        expected_underflow          <= 1'b1; // Trigger underflow
+                        // dout should retain its previous value as no valid read occurred.
+                    end
+                end
+
+                2'b11: begin // Simultaneous Write and Read - Reference model with CORRECT behavior
+                    if (expected_full) begin // FIFO is full: only read, write causes overflow
+                        expected_overflow           <= 1'b1;
+                        expected_dout               <= ref_fifo_mem[ref_rd_ptr_tb];
+                        ref_rd_ptr_tb               <= ref_rd_ptr_tb + 1'b1;
+                        ref_count_tb                <= ref_count_tb - 1'b1;
+                    end else if (expected_empty) begin // FIFO is empty: only write, read causes underflow
+                        expected_underflow          <= 1'b1;
+                        ref_fifo_mem[ref_wr_ptr_tb] <= din;
+                        ref_wr_ptr_tb               <= ref_wr_ptr_tb + 1'b1;
+                        ref_count_tb                <= ref_count_tb + 1'b1;
+                        // dout should retain its previous value as no valid read occurred.
+                    end else begin // FIFO is partially full: both write and read succeed
+                        ref_fifo_mem[ref_wr_ptr_tb] <= din;
+                        ref_wr_ptr_tb               <= ref_wr_ptr_tb + 1'b1;
+                        expected_dout               <= ref_fifo_mem[ref_rd_ptr_tb];
+                        ref_rd_ptr_tb               <= ref_rd_ptr_tb + 1'b1;
+                        // ref_count_tb remains unchanged for simultaneous valid W/R
+                    end
+                end
+
+                default: begin
+                    // No operation. expected_dout holds previous value (as it's a `reg`).
+                    // ref_count_tb and pointers also remain unchanged.
+                end
+            endcase
+            // Update expected_count based on ref_count_tb for comparison
+            expected_count = ref_count_tb;
+        end
+    end
+
+    // --------------------------------------------------------------------
+    // Verification Block: Compares DUT outputs with Reference Model predictions
+    // Runs slightly after the clock edge to allow signals to propagate.
+    // --------------------------------------------------------------------
+    always @(posedge clk) begin
+        #1; // Wait a small delta for combinational outputs (full, empty) to settle
+            // and registered outputs (dout, count, overflow, underflow) to propagate.
+
+        // Check dout - always compare, as `expected_dout` is precisely modeled
+        if (dout !== expected_dout) begin // Using !== to catch X's or Z's
+            $display("FAIL: Data output mismatch. Exp. dout = %h, Got dout = %h at time %0t (count=%0d, ref_count=%0d, wr_en=%b, rd_en=%b)",
+                     expected_dout, dout, $time, count, ref_count_tb, wr_en, rd_en);
+            error_count = error_count + 1;
+        end
+
+        // Check status flags and count
+        if (full !== expected_full) begin
+            $display("FAIL: Full flag mismatch. Exp. full = %b, Got full = %b at time %0t (count=%0d, ref_count=%0d)",
+                     expected_full, full, $time, count, ref_count_tb);
+            error_count = error_count + 1;
+        end
+        if (empty !== expected_empty) begin
+            $display("FAIL: Empty flag mismatch. Exp. empty = %b, Got empty = %b at time %0t (count=%0d, ref_count=%0d)",
+                     expected_empty, empty, $time, count, ref_count_tb);
+            error_count = error_count + 1;
+        end
+        if (overflow !== expected_overflow) begin
+            $display("FAIL: Overflow flag mismatch. Exp. overflow = %b, Got overflow = %b at time %0t (count=%0d, ref_count=%0d)",
+                     expected_overflow, overflow, $time, count, ref_count_tb);
+            error_count = error_count + 1;
+        end
+        if (underflow !== expected_underflow) begin
+            $display("FAIL: Underflow flag mismatch. Exp. underflow = %b, Got underflow = %b at time %0t (count=%0d, ref_count=%0d)",
+                     expected_underflow, underflow, $time, count, ref_count_tb);
+            error_count = error_count + 1;
+        end
+        if (count !== expected_count) begin
+            $display("FAIL: Count mismatch. Exp. count = %0d, Got count = %0d at time %0t (ref_count=%0d)",
+                     expected_count, count, $time, ref_count_tb);
+            error_count = error_count + 1;
+        end
+    end
+
+    // --------------------------------------------------------------------
+    // Test Sequencing Tasks
+    // --------------------------------------------------------------------
+
+    task reset_dut;
         begin
-            $display("--------------------------------------------------");
-            $display("RESETTING FIFO...");
+            $display("INFO: Resetting DUT at time %0t...", $time);
+            wr_en   = 1'b0;
+            rd_en   = 1'b0;
+            din     = {DATA_WIDTH{1'b0}};
+            rst_n   = 1'b0; // Assert reset
+            @(posedge clk);
+            @(posedge clk); // Hold reset for 2 clock cycles
+            rst_n   = 1'b1; // De-assert reset
+            @(posedge clk); // Wait one cycle for reset to propagate and initial state to settle
+            $display("INFO: Reset complete at time %0t.", $time);
+        end
+    endtask
+
+    task advance_clocks;
+        input integer num_cycles;
+        begin
+            for (j=0; j<num_cycles; j=j+1) begin
+                @(posedge clk);
+            end
+        end
+    endtask
+
+    task write_data_and_check;
+        input [DATA_WIDTH-1:0] data_in;
+        begin
+            $display("INFO: Writing data %h at time %0t (DUT count=%0d)", data_in, $time, count);
+            wr_en = 1'b1;
+            din   = data_in;
+            rd_en = 1'b0;
+            @(posedge clk); // Perform write operation
+            wr_en = 1'b0;   // De-assert write enable after one cycle
+        end
+    endtask
+
+    task read_data_and_check;
+        output [DATA_WIDTH-1:0] read_val; // For storing the DUT's dout, not for checking
+        begin
+            $display("INFO: Reading data at time %0t (DUT count=%0d)", $time, count);
+            wr_en = 1'b0;
+            rd_en = 1'b1;
+            @(posedge clk); // Perform read operation; dout becomes valid
+            read_val = dout; // Sample dout
+            rd_en = 1'b0;   // De-assert read enable after one cycle
+        end
+    endtask
+
+    task write_read_simultaneous_and_check;
+        input [DATA_WIDTH-1:0] write_data;
+        output [DATA_WIDTH-1:0] read_val; // For storing the DUT's dout, not for checking
+        begin
+            $display("INFO: Simultaneous write %h and read at time %0t (DUT count=%0d)", write_data, $time, count);
+            wr_en = 1'b1;
+            din   = write_data;
+            rd_en = 1'b1;
+            @(posedge clk); // Perform simultaneous W/R operation
+            read_val = dout; // Sample dout
             wr_en = 1'b0;
             rd_en = 1'b0;
-            din   = {DATA_WIDTH{1'b0}};
-            rst_n = 1'b0; // Assert reset (active-low)
-            ref_rst_n = 1'b0; // Assert ref model reset (synchronous reset)
-            @(posedge clk);
-            @(posedge clk); // Hold reset for 2 cycles
-            rst_n = 1'b1; // Deassert reset
-            ref_rst_n = 1'b1; // Deassert ref model reset
-            $display("FIFO RESET COMPLETE.");
         end
     endtask
 
-    // Task to update reference model state based on current testbench inputs
-    // This task should be called *before* the posedge clk that updates the DUT.
-    // It predicts the state of the FIFO *after* the current clock edge.
-    task update_ref_model;
-        begin
-            // Error flags reset every cycle unless re-triggered
-            ref_overflow  = 1'b0;
-            ref_underflow = 1'b0;
 
-            if (!ref_rst_n) begin // If reset is active
-                ref_wr_ptr    = {ADDR_WIDTH{1'b0}};
-                ref_rd_ptr    = {ADDR_WIDTH{1'b0}};
-                ref_dout      = {DATA_WIDTH{1'b0}}; // Dout is reset to 0
-                ref_count     = 0;
-                ref_empty     = 1'b1;
-                ref_full      = 1'b0;
-            end else begin
-                // Update empty/full based on current ref_count *before* operations for this cycle
-                ref_empty = (ref_count == 0);
-                ref_full  = (ref_count == DEPTH);
-
-                case ({wr_en, rd_en})
-                    2'b10: begin // Write only
-                        if (!ref_full) begin
-                            ref_mem[ref_wr_ptr] = din;
-                            ref_wr_ptr          = ref_wr_ptr + 1'b1;
-                            ref_count           = ref_count + 1'b1;
-                        end else begin
-                            ref_overflow        = 1'b1;
-                        end
-                    end
-
-                    2'b01: begin // Read only
-                        if (!ref_empty) begin
-                            ref_dout            = ref_mem[ref_rd_ptr];
-                            ref_rd_ptr          = ref_rd_ptr + 1'b1;
-                            ref_count           = ref_count - 1'b1;
-                        end else begin
-                            ref_underflow       = 1'b1;
-                            ref_dout            = {DATA_WIDTH{1'b0}}; // No valid data on underflow
-                        end
-                    end
-
-                    2'b11: begin // Simultaneous Write and Read
-                        // Logic reflects correct FIFO behavior for simultaneous R/W
-                        if (ref_full) begin // FIFO is full, write is ignored, read occurs.
-                            ref_overflow        = 1'b1; // Overflow on write attempt
-                            ref_dout            = ref_mem[ref_rd_ptr];
-                            ref_rd_ptr          = ref_rd_ptr + 1'b1;
-                            ref_count           = ref_count - 1'b1;
-                        end else if (ref_empty) begin // FIFO is empty, read is ignored, write occurs.
-                            ref_underflow       = 1'b1; // Underflow on read attempt
-                            ref_mem[ref_wr_ptr] = din;
-                            ref_wr_ptr          = ref_wr_ptr + 1'b1;
-                            ref_count           = ref_count + 1'b1;
-                            ref_dout            = {DATA_WIDTH{1'b0}}; // No valid data read
-                        end else begin // Neither full nor empty: both happen, count unchanged.
-                            ref_mem[ref_wr_ptr] = din;
-                            ref_wr_ptr          = ref_wr_ptr + 1'b1;
-                            ref_dout            = ref_mem[ref_rd_ptr];
-                            ref_rd_ptr          = ref_rd_ptr + 1'b1;
-                            // ref_count remains unchanged
-                        end
-                    end
-
-                    default: begin
-                        // No operation, flags reset, other states unchanged
-                    end
-                endcase
-            end
-        end
-    endtask
-
-    // Task to compare DUT outputs with reference model
-    // This task should be called *after* a posedge clk, when DUT outputs are stable.
-    task check_fifo_state;
-        begin
-            @(posedge clk); // Wait for outputs to settle after operations
-            $display("Time %0t: Checking FIFO state (Test #%0d)...", $time, test_idx);
-
-            // Compare dout
-            // On a valid read (rd_en asserted and not empty), dout must match ref_dout.
-            // On an underflow read (rd_en asserted and empty), dout is garbage or the last value.
-            // For the bug, it reads uninitialized memory. Ref_dout will be 0.
-            // When no read occurs, dout holds its last value.
-            if (rd_en && !empty) begin // Valid read
-                if (dout !== ref_dout) begin
-                    $display("[FAIL] dout mismatch on VALID READ. Expected: %h, Got: %h", ref_dout, dout);
-                    error_count = error_count + 1;
-                end else begin
-                    $display("[PASS] dout matches on valid read: %h", dout);
-                end
-            end else if (rd_en && empty) begin // Underflow read
-                // On underflow, ref_dout is forced to 0. DUT's dout will likely be X or garbage
-                // but the DUT bug forces it to decrement count and read memory anyway.
-                // Comparing dout directly against ref_dout=0 is the most robust check here.
-                if (dout !== ref_dout) begin
-                    $display("[FAIL] dout mismatch on UNDERFLOW READ. Expected: %h, Got: %h (DUT reads uninitialized/garbage)", ref_dout, dout);
-                    error_count = error_count + 1;
-                end else begin
-                    $display("[PASS] dout matches on underflow read: %h", dout); // Should typically be 0
-                end
-            end else begin // No read or not applicable, dout should ideally retain old value or be 0 after reset
-                $display("[INFO] dout was not updated by current cycle's operation, current value: %h", dout);
-            end
-
-            // Compare status flags and count
-            if (full !== ref_full) begin
-                $display("[FAIL] full mismatch. Expected: %b, Got: %b", ref_full, full);
-                error_count = error_count + 1;
-            end else begin
-                $display("[PASS] full matches: %b", full);
-            end
-
-            if (empty !== ref_empty) begin
-                $display("[FAIL] empty mismatch. Expected: %b, Got: %b", ref_empty, empty);
-                error_count = error_count + 1;
-            end else begin
-                $display("[PASS] empty matches: %b", empty);
-            end
-
-            if (overflow !== ref_overflow) begin
-                $display("[FAIL] overflow mismatch. Expected: %b, Got: %b", ref_overflow, overflow);
-                error_count = error_count + 1;
-            end else begin
-                $display("[PASS] overflow matches: %b", overflow);
-            end
-
-            if (underflow !== ref_underflow) begin
-                $display("[FAIL] underflow mismatch. Expected: %b, Got: %b", ref_underflow, underflow);
-                error_count = error_count + 1;
-            end else begin
-                $display("[PASS] underflow matches: %b", underflow);
-            end
-
-            if (count !== ref_count) begin
-                $display("[FAIL] count mismatch. Expected: %0d, Got: %0d", ref_count, count);
-                error_count = error_count + 1;
-            end else begin
-                $display("[PASS] count matches: %0d", count);
-            end
-
-            $display("--------------------------------------------------");
-        end
-    endtask
-
+    // --------------------------------------------------------------------
     // Main Test Sequence
+    // --------------------------------------------------------------------
     initial begin
-        // VCD Dump Setup
+        // VCD dump setup
         $dumpfile("C:/Users/91900/.gemini/antigravity/scratch/ai_verification/logs/sync_fifo.vcd");
         $dumpvars(0, tb_sync_fifo);
 
-        // Initialize Testbench variables
+        // Initial testbench signal states
         clk         = 1'b0;
         rst_n       = 1'b0;
         wr_en       = 1'b0;
         rd_en       = 1'b0;
         din         = {DATA_WIDTH{1'b0}};
         error_count = 0;
-        test_idx    = 0;
 
-        // Give some time for initial setup of VCD
-        #100;
+        $display("INFO: Starting testbench for sync_fifo with DATA_WIDTH=%0d, DEPTH=%0d", DATA_WIDTH, DEPTH);
 
-        // --- Test Scenario 1: Reset Verification ---
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] RESET VERIFICATION", test_idx);
-        reset_fifo;
-        // After reset, DUT and ref model should be empty, count=0, dout=0
-        wr_en = 1'b0; rd_en = 1'b0; din = {DATA_WIDTH{1'b0}}; // Inputs for updating ref model
-        update_ref_model; // Sets ref_empty=1, ref_full=0, ref_count=0, ref_dout=0
-        check_fifo_state;
+        // --- TEST 1: Reset Verification ---
+        reset_dut;
+        if (count == 0 && empty == 1 && full == 0 && overflow == 0 && underflow == 0) begin
+            $display("PASS: Reset verification - FIFO is empty and flags are clear at time %0t.", $time);
+        end else begin
+            $display("FAIL: Reset verification - FIFO state unexpected at time %0t.", $time);
+            error_count = error_count + 1;
+        end
 
-
-        // --- Test Scenario 2: Fill FIFO (Write Only) ---
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] FILL FIFO (WRITE ONLY)", test_idx);
-        wr_en = 1'b1;
-        rd_en = 1'b0;
+        // --- TEST 2: Fill FIFO completely ---
+        $display("INFO: --- TEST 2: Fill FIFO ---");
         for (i = 0; i < DEPTH; i = i + 1) begin
-            din = i; // Write increasing data
-            $display("Time %0t: Writing data %h", $time, din);
-            update_ref_model; // Update ref model *before* positive edge
-            check_fifo_state; // Check on posedge, after ref model is updated
+            write_data_and_check({$random}); // Use $random for random data
         end
-        wr_en = 1'b0; // Stop writing
+        advance_clocks(1); // Allow one extra cycle for last checks to propagate
+        if (full == 1 && empty == 0 && count == DEPTH) begin
+            $display("PASS: FIFO filled to capacity at time %0t.", $time);
+        end else begin
+            $display("FAIL: FIFO not full after %0d writes at time %0t (count=%0d).", DEPTH, $time, count);
+            error_count = error_count + 1;
+        end
 
-        // Check if FIFO is full
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] CHECK FULL STATE", test_idx);
-        wr_en = 1'b0; rd_en = 1'b0; // No operations
-        update_ref_model;
-        check_fifo_state;
+        // --- TEST 3: Overflow check (write to full FIFO) ---
+        $display("INFO: --- TEST 3: Overflow check ---");
+        write_data_and_check({$random}); // Attempt to write when full
+        advance_clocks(1);
+        if (overflow == 1 && full == 1 && count == DEPTH) begin
+            $display("PASS: Overflow detected when writing to full FIFO at time %0t.", $time);
+        end else begin
+            $display("FAIL: Overflow not detected or FIFO state incorrect when writing to full FIFO at time %0t (overflow=%b, count=%0d).", $time, overflow, count);
+            error_count = error_count + 1;
+        end
 
-
-        // --- Test Scenario 3: Overflow Test (Write to Full FIFO) ---
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] OVERFLOW TEST (Write to Full FIFO)", test_idx);
-        wr_en = 1'b1;
-        din   = 8'hAA; // Try to write new data
-        update_ref_model; // Ref model will assert ref_overflow
-        check_fifo_state;
-        wr_en = 1'b0; // Stop attempting write
-
-        // Check state after overflow attempt (should still be full, overflow flag cleared)
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] CHECK STATE AFTER OVERFLOW ATTEMPT", test_idx);
-        wr_en = 1'b0; rd_en = 1'b0;
-        update_ref_model; // Ref model's overflow will be cleared
-        check_fifo_state;
-
-        // --- Test Scenario 4: Empty FIFO (Read Only) ---
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] EMPTY FIFO (READ ONLY)", test_idx);
-        rd_en = 1'b1;
-        wr_en = 1'b0;
+        // --- TEST 4: Empty FIFO completely ---
+        $display("INFO: --- TEST 4: Empty FIFO ---");
         for (i = 0; i < DEPTH; i = i + 1) begin
-            $display("Time %0t: Reading data...", $time);
-            update_ref_model; // Ref model will set ref_dout to ref_mem[ref_rd_ptr] and decrement count
-            check_fifo_state; // Check dout against ref_dout
+            reg [DATA_WIDTH-1:0] temp_dout;
+            read_data_and_check(temp_dout);
         end
-        rd_en = 1'b0; // Stop reading
-
-        // Check if FIFO is empty
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] CHECK EMPTY STATE", test_idx);
-        wr_en = 1'b0; rd_en = 1'b0;
-        update_ref_model;
-        check_fifo_state;
-
-        // --- Test Scenario 5: Underflow Test (Read from Empty FIFO) ---
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] UNDERFLOW TEST (Read from Empty FIFO)", test_idx);
-        rd_en = 1'b1;
-        update_ref_model; // Ref model will assert ref_underflow, ref_dout will be 0
-        check_fifo_state;
-        rd_en = 1'b0; // Stop attempting read
-
-        // Check state after underflow attempt (should still be empty, underflow flag cleared)
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] CHECK STATE AFTER UNDERFLOW ATTEMPT", test_idx);
-        wr_en = 1'b0; rd_en = 1'b0;
-        update_ref_model; // Ref model's underflow will be cleared
-        check_fifo_state;
-
-
-        // --- Test Scenario 6: Simultaneous Write and Read (Normal Operation) ---
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] SIMULTANEOUS W/R (NORMAL OPERATION)", test_idx);
-        // Fill FIFO partially to half capacity
-        wr_en = 1'b1;
-        rd_en = 1'b0;
-        for (i = 0; i < DEPTH/2; i = i + 1) begin
-            din = i + 8'h10; // Write data 0x10, 0x11, etc.
-            update_ref_model;
-            check_fifo_state;
+        advance_clocks(1);
+        if (empty == 1 && full == 0 && count == 0) begin
+            $display("PASS: FIFO emptied completely at time %0t.", $time);
+        end else begin
+            $display("FAIL: FIFO not empty after %0d reads at time %0t (count=%0d).", DEPTH, $time, count);
+            error_count = error_count + 1;
         end
-        wr_en = 1'b0;
 
-        // Perform simultaneous W/R, FIFO should maintain its level (DEPTH/2)
-        wr_en = 1'b1;
-        rd_en = 1'b1;
-        for (i = 0; i < DEPTH/2; i = i + 1) begin
-            din = 8'h50 + i; // New data 0x50, 0x51, etc.
-            $display("Time %0t: Simultaneous W/R, Write %h, Read expected %h", $time, din, ref_dout);
-            update_ref_model; // Ref model will reflect data 'passing through', count unchanged
-            check_fifo_state;
+        // --- TEST 5: Underflow check (read from empty FIFO) ---
+        $display("INFO: --- TEST 5: Underflow check ---");
+        reg [DATA_WIDTH-1:0] temp_dout;
+        read_data_and_check(temp_dout); // Attempt to read when empty
+        advance_clocks(1);
+        if (underflow == 1 && empty == 1 && count == 0) begin
+            $display("PASS: Underflow detected when reading from empty FIFO at time %0t.", $time);
+        end else begin
+            $display("FAIL: Underflow not detected or FIFO state incorrect when reading from empty FIFO at time %0t (underflow=%b, count=%0d).", $time, underflow, count);
+            error_count = error_count + 1;
         end
-        wr_en = 1'b0;
-        rd_en = 1'b0;
 
-        // Check state after simultaneous ops (count should be DEPTH/2)
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] CHECK STATE AFTER SIMULTANEOUS W/R", test_idx);
-        wr_en = 1'b0; rd_en = 1'b0;
-        update_ref_model;
-        check_fifo_state;
-
-
-        // --- Test Scenario 7: Simultaneous W/R when FIFO is Full ---
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] SIMULTANEOUS W/R (FIFO FULL)", test_idx);
-        // Fill FIFO completely
-        wr_en = 1'b1;
-        rd_en = 1'b0;
-        for (i = 0; i < DEPTH/2; i = i + 1) begin // Finish filling from half full
-            din = i + 8'h80; // Write data 0x80, 0x81, etc.
-            update_ref_model;
-            check_fifo_state;
+        // --- TEST 6: Mixed Writes and Reads ---
+        $display("INFO: --- TEST 6: Mixed Writes and Reads ---");
+        reset_dut;
+        for (i = 0; i < DEPTH / 2; i = i + 1) begin // Fill half
+            write_data_and_check({$random});
         end
-        wr_en = 1'b0; // Now FIFO is full
+        for (i = 0; i < DEPTH / 4; i = i + 1) begin // Read a quarter
+            read_data_and_check(temp_dout);
+        end
+        for (i = 0; i < DEPTH / 4; i = i + 1) begin // Write another quarter
+            write_data_and_check({$random});
+        end
+        advance_clocks(1);
+        if (count == DEPTH / 2 && !empty && !full) begin
+             $display("PASS: Mixed write/read operations resulted in correct count (%0d) at time %0t.", count, $time);
+        end else begin
+             $display("FAIL: Mixed write/read operations resulted in incorrect count (%0d) at time %0t.", count, $time);
+             error_count = error_count + 1;
+        end
 
-        // Attempt simultaneous W/R
-        wr_en = 1'b1;
-        rd_en = 1'b1;
-        din = 8'hBB; // Attempt to write new data
-        $display("Time %0t: Simultaneous W/R to FULL FIFO. Attempt write %h, Read expected %h", $time, din, ref_dout);
-        update_ref_model; // Ref model expects overflow, read occurs, count--
-        check_fifo_state;
-        wr_en = 1'b0;
-        rd_en = 1'b0;
-
-        // Check state after (should be one less than full)
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] CHECK FIFO STATE after W/R (FIFO FULL)", test_idx);
-        wr_en = 1'b0; rd_en = 1'b0;
-        update_ref_model;
-        check_fifo_state;
-
-        // --- Test Scenario 8: BUG DETECTION - Simultaneous W/R when FIFO is Empty ---
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] BUG DETECTION - SIMULTANEOUS W/R (FIFO EMPTY)", test_idx);
-        // Reset FIFO to ensure it's empty
-        reset_fifo;
-        // Check initial empty state
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] Initial state after reset (Empty)", test_idx);
-        wr_en = 1'b0; rd_en = 1'b0;
-        update_ref_model;
-        check_fifo_state;
-
-        // Perform simultaneous W/R when FIFO is empty
-        wr_en = 1'b1;
-        rd_en = 1'b1;
-        din   = 8'hCC; // Data to write
-        $display("Time %0t: Simultaneous W/R to EMPTY FIFO. Write %h", $time, din);
-        // Reference model expects: underflow=1, count becomes 1, dout 0.
-        // DUT (buggy) expects: underflow=1, count becomes DEPTH (from 0-1), dout uninitialized value (X).
-        update_ref_model; // Predicts correct behavior
-        check_fifo_state; // This should trigger FAIL for count and dout.
-        wr_en = 1'b0;
-        rd_en = 1'b0;
-
-        // After the bug trigger, check state (ref model: 1 element, no flags set anymore)
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] CHECK STATE AFTER BUG TRIGGER", test_idx);
-        wr_en = 1'b0; rd_en = 1'b0;
-        update_ref_model;
-        check_fifo_state;
+        // --- TEST 7: Simultaneous Write and Read (Partially Full) ---
+        $display("INFO: --- TEST 7: Simultaneous Write/Read (Partially Full) ---");
+        reset_dut;
+        for (i = 0; i < DEPTH / 4; i = i + 1) begin // Fill to 1/4 full for initial state
+            write_data_and_check({$random});
+        end
+        advance_clocks(1); // Allow state to propagate
+        if (count != DEPTH / 4) begin
+            $display("ERROR: Setup for TEST 7 failed. Count is %0d, expected %0d.", count, DEPTH/4);
+            error_count = error_count + 1;
+        end
+        $display("INFO: FIFO is %0d/%0d full. Performing %0d simultaneous W/R cycles.", count, DEPTH, DEPTH/2);
+        for (i = 0; i < DEPTH / 2; i = i + 1) begin // Perform several simultaneous W/R
+            write_read_simultaneous_and_check({$random});
+        end
+        advance_clocks(1); // Final check cycle
+        // Verification is handled by the always block, just check overall error_count.
+        if (error_count == 0) begin
+            $display("PASS: Simultaneous Write/Read (Partially Full) completed without errors at time %0t.", $time);
+        end else begin
+            $display("FAIL: Simultaneous Write/Read (Partially Full) reported errors at time %0t.", $time);
+        end
 
 
-        // --- Test Scenario 9: Constrained-Random Stress Test ---
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] CONSTRAINED-RANDOM STRESS TEST", test_idx);
-        reset_fifo;
-        // Check initial state
-        test_idx = test_idx + 1;
-        $display("\n[TEST %0d] Initial state for Random Test (Empty)", test_idx);
-        wr_en = 1'b0; rd_en = 1'b0;
-        update_ref_model;
-        check_fifo_state;
+        // --- TEST 8: Simultaneous Write and Read (When FIFO is FULL) ---
+        $display("INFO: --- TEST 8: Simultaneous Write/Read (When FULL) ---");
+        reset_dut;
+        for (i = 0; i < DEPTH; i = i + 1) begin // Fill completely
+            write_data_and_check({$random});
+        end
+        advance_clocks(1);
+        if (!full) begin
+            $display("ERROR: Setup for TEST 8 failed. FIFO not full.");
+            error_count = error_count + 1;
+        end
+        $display("INFO: FIFO is FULL. Performing simultaneous W/R. Expecting read and overflow.");
+        write_read_simultaneous_and_check({$random}); // Should read, assert overflow, count decrements
+        advance_clocks(1);
+        if (error_count == 0) begin
+            $display("PASS: Simultaneous Write/Read (When FULL) completed without errors at time %0t.", $time);
+        end else begin
+            $display("FAIL: Simultaneous Write/Read (When FULL) reported errors at time %0t.", $time);
+        end
 
-        max_cycles = 1000;
-        i = 0; // Initialize loop counter before while loop
-        while (i < max_cycles) begin // Replaced for loop with while for older Icarus compatibility
-            // Reset inputs for current cycle
+        // --- TEST 9: Simultaneous Write and Read (When FIFO is EMPTY) ---
+        // THIS TEST IS EXPECTED TO CATCH THE INJECTED BUG
+        $display("INFO: --- TEST 9: Simultaneous Write/Read (When EMPTY) ---");
+        reset_dut;
+        advance_clocks(1);
+        if (!empty) begin
+            $display("ERROR: Setup for TEST 9 failed. FIFO not empty.");
+            error_count = error_count + 1;
+        end
+        $display("INFO: FIFO is EMPTY. Performing simultaneous W/R. Expecting write and underflow (and DUT bug!).");
+        write_read_simultaneous_and_check({$random}); // Should write, assert underflow, count increments
+        advance_clocks(1);
+        if (error_count > 0) begin // Expect errors here due to the bug
+            $display("PASS: Simultaneous Write/Read (When EMPTY) successfully exposed the injected bug at time %0t.", $time);
+        end else begin
+            $display("FAIL: Simultaneous Write/Read (When EMPTY) did NOT expose the injected bug (expected errors) at time %0t.", $time);
+            error_count = error_count + 1; // Mark as fail if bug isn't found
+        end
+
+        // --- TEST 10: Constrained Random Stress Test ---
+        $display("INFO: --- TEST 10: Constrained Random Stress Test (100 * DEPTH cycles) ---");
+        reset_dut;
+        for (i = 0; i < 100 * DEPTH; i = i + 1) begin // Many random operations
+            integer op_choice;
+            reg [DATA_WIDTH-1:0] current_din;
+
+            op_choice = $urandom % 3; // 0=Write, 1=Read, 2=Simultaneous W/R
+
             wr_en = 1'b0;
             rd_en = 1'b0;
-            din   = $urandom; // Always provide random data
+            current_din = {$urandom}; // Always provide a random din
 
-            random_op = $urandom % 4; // 0: NOP, 1: Write, 2: Read, 3: W/R
-
-            // Simple constraint logic to avoid non-sensical operations for the random choice
-            // Converted 'else if' chain to nested 'if/else begin ... end' blocks
-            if ( (random_op == 1) && ref_full ) begin // If attempting to write to full FIFO
-                random_op = ($urandom % 2 == 0) ? 0 : 2; // Try NOP or Read instead
-            end
-            else begin // Explicit else for the first condition
-                if ( (random_op == 2) && ref_empty ) begin // If attempting to read from empty FIFO
-                    random_op = ($urandom % 2 == 0) ? 0 : 1; // Try NOP or Write instead
-                end
-                else begin // Explicit else for the second condition
-                    if (random_op == 3) begin // Simultaneous W/R
-                        if (ref_full) begin // If full, write is ignored by ref model, essentially a read op
-                            random_op = 2; // Simulate as read only
-                        end
-                        else begin // Explicit else for the inner if
-                            if (ref_empty) begin // If empty, read is ignored by ref model, essentially a write op
-                                random_op = 1; // Simulate as write only
-                            end
-                            // Else (neither full nor empty), keep as 3 (simultaneous). No 'else' block needed.
-                        end
-                    end
-                end
-            end
-
-            case (random_op)
-                0: begin // NOP
-                    $display("Time %0t: Random Test NOP.", $time);
-                end
-                1: begin // Write
+            case (op_choice)
+                0: begin // Write
                     wr_en = 1'b1;
-                    $display("Time %0t: Random Test Write data %h.", $time, din);
+                    din = current_din;
                 end
-                2: begin // Read
+                1: begin // Read
                     rd_en = 1'b1;
-                    $display("Time %0t: Random Test Read.", $time);
                 end
-                3: begin // Simultaneous Write & Read
+                2: begin // Simultaneous Write and Read
                     wr_en = 1'b1;
                     rd_en = 1'b1;
-                    $display("Time %0t: Random Test Simultaneous W/R, Write data %h.", $time, din);
+                    din = current_din;
+                end
+                default: begin // No op (should not happen with %3)
+                    wr_en = 1'b0;
+                    rd_en = 1'b0;
+                    din = current_din;
                 end
             endcase
-
-            update_ref_model; // Predict next state
-            check_fifo_state; // Check DUT against predicted state
-            i = i + 1; // Increment loop counter for while loop
-        end // End of while loop
-        wr_en = 1'b0;
-        rd_en = 1'b0;
-
-        // Final check after random test, if anything is left in FIFO, drain it
-        if (count > 0) begin
-            test_idx = test_idx + 1;
-            $display("\n[TEST %0d] DRAIN FIFO AFTER RANDOM TEST", test_idx);
-            rd_en = 1'b1;
-            while (count > 0) begin
-                update_ref_model;
-                check_fifo_state;
-            end
-            rd_en = 1'b0;
+            @(posedge clk);
         end
+        wr_en = 1'b0;
+        rd_en = 1'b0; // De-assert inputs
+        advance_clocks(2); // Final check cycles to allow last operations to complete and be verified
+        $display("INFO: Random stress test complete. Check previous messages for any errors.");
 
-        // --- Simulation Summary ---
-        $display("\n==================================================");
+
+        // --- Final Report ---
+        $display("INFO: Simulation finished at time %0t.", $time);
         if (error_count == 0) begin
             $display("ALL TESTS PASSED");
         end else begin
             $display("SIMULATION FAILED: Total Errors = %0d", error_count);
         end
-        $display("==================================================");
-
-        $finish; // Terminate simulation cleanly
-
+        $finish; // Terminate simulation
     end
 
 endmodule
