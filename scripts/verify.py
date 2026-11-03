@@ -149,6 +149,9 @@ Requirements for the testbench:
    - Declare internal test variables at the module level or at the top of initial blocks.
    - For random values, use `$random` or `$urandom`.
    - Ensure all binary literals ('b) contain only 0 and 1 (use 2'b11 or 2'd3, never 2'b03).
+   - MANDATORY WATCHDOG: Always include a safety watchdog timer to prevent infinite hangs:
+     `initial begin #2000000; $display("[ERROR] Watchdog timeout: simulation hung!"); $finish; end`
+   - AVOID DEADLOCKS: Never use unbounded `@(posedge signal)` waits. Instead use timeout-guarded loops or bounded delays.
 2. Instantiate the DUT with instance name `dut`.
 3. Include a clock generator (`always #5 clk = ~clk;`) and proper synchronous active-low reset initialization if sequential.
 4. Comprehensive test scenarios:
@@ -207,11 +210,17 @@ Please fix the testbench for Icarus Verilog:
 
     print("[2/4] Compilation passed!")
 
-    # Step 3: Run simulation with vvp
+    # Step 3: Run simulation with vvp (with timeout guard)
     print(f"\n[3/4] Running simulation with vvp...")
     sim_cmd = [vvp_bin, str(sim_bin)]
-    sim_result = subprocess.run(sim_cmd, capture_output=True, text=True)
-    sim_output = sim_result.stdout + sim_result.stderr
+    try:
+        sim_result = subprocess.run(sim_cmd, capture_output=True, text=True, timeout=12)
+        sim_output = sim_result.stdout + sim_result.stderr
+        returncode = sim_result.returncode
+    except subprocess.TimeoutExpired as e:
+        print("\n[!] Simulation exceeded timeout (12s). Deadlock or missing handshake detected!")
+        sim_output = (e.stdout or "") + (e.stderr or "") + "\n[FAIL] Simulation timed out: possible infinite loop or missed pulse event."
+        returncode = 1
 
     with open(sim_log, "w", encoding="utf-8") as f:
         f.write(sim_output)
@@ -249,9 +258,12 @@ Please fix the testbench:
     # Step 4: Check for Failures & Feedback Loop
     has_failure = (
         "[FAIL]" in sim_output or
+        "[ERROR]" in sim_output or
         "SIMULATION FAILED" in sim_output or
         "FAILED" in sim_output or
-        sim_result.returncode != 0
+        "timed out" in sim_output or
+        "simulation hung" in sim_output.lower() or
+        returncode != 0
     )
 
     if not has_failure:

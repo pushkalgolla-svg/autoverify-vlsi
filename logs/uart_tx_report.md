@@ -1,96 +1,57 @@
-## ASIC/FPGA Verification Report
+### 1. Executive Summary
+The UART transmitter simulation failed during **Test 2** (`No Parity, Data = 8'hA5`), hanging indefinitely until the testbench watchdog timer expired at $t = 2,000,000\,\text{ns}$. Specifically, the testbench task `check_uart_tx` blocked indefinitely waiting for the `tx_busy` signal to assert (`@(posedge tx_busy);`), which never occurred because the UART state machine failed to transition out of `STATE_IDLE`.
 
-**Module Under Test:** `uart_tx.v`
+---
 
-**1. Executive Summary**
+### 2. Root Cause Classification
+* **Bug Location:** **RTL Design (`uart_tx.v`)**
+* **Nature of Bug:** Logic bug / implementation error (premature state termination and improper baud count boundary checks).
 
-The Verilog simulation of the `uart_tx` module failed with 133 errors. Initial analysis of the simulation log reveals two primary categories of failures:
+---
 
-1.  **Initial Transmission Failures (First `send_and_verify` call):** The first data transmission (0x55, no parity) reported that `tx_busy` did not assert, the `tx` line remained HIGH (did not go LOW for the start bit), and subsequent data bits were also incorrectly HIGH. These failures occurred prematurely at the very start of the transmission.
-2.  **Persistent `tx_done` Failure (All `send_and_verify` calls):** Across all directed and random tests, the `tx_done` output signal was consistently reported as "did not pulse after transmission". Other checks like parity bit value and `tx_busy` deassertion often passed in subsequent tests, but `tx_done` always failed.
+### 3. Detailed Technical Explanation
+1. **The Culprit in the Stop State (`STATE_STOP`):**
+   In `uart_tx.v`, under `STATE_STOP`, an explicit code comment and accompanying buggy conditional block were injected:
+   ```verilog
+   // INJECTED BUG: Ends stop bit prematurely at clk_count == 2
+   // instead of waiting for full CLKS_PER_BIT - 1!
+   if (clk_count < 2) begin
+       clk_count <= clk_count + 1'b1;
+   end else begin
+       clk_count <= 16'd0;
+       tx_done   <= 1'b1;
+       state     <- STATE_IDLE;
+   end
+   ```
+   Instead of holding the `tx` line HIGH for the full duration of a bit period (`CLKS_PER_BIT - 1`, which is `9` for `CLKS_PER_BIT = 10`), the stop state prematurely cuts the stop bit short after only 3 clock cycles (`clk_count` values `0`, `1`, `2`). 
 
-The root causes were identified as a **testbench timing error** for initial signal checks and a **bug in the RTL's stop bit duration logic**.
+2. **Downstream Framing and Handshaking Failures:**
+   By truncating the stop bit, the UART timing is corrupted, causing severe framing errors on back-to-back transmissions (as noted in the comments) and corrupting internal state tracking. More critically, because the baud-rate counter and state transitions across other states rely on consistent clock timing relative to `CLKS_PER_BIT`, this disruption ripples through subsequent start/stop/idle transitions, eventually causing the transmitter to lock up or fail to latch subsequent `tx_start` pulses properly, leaving `tx_busy` deasserted.
 
-**2. Root Cause Classification**
+---
 
-*   **RTL Design Bug:** The primary functional bug causing the `tx_done` failure and premature end of transmission resides in `uart_tx.v`.
-*   **Testbench Bug:** The initial failures observed in the very first transmission (e.g., `tx_busy` not asserting, `tx` line remaining high) are due to incorrect timing in the `tb_uart_tx.v` when sampling DUT outputs immediately after driving inputs.
-
-**3. Detailed Technical Explanation**
-
-**3.1. Testbench Timing Issue (Initial Failures)**
-
-*   **Problem:** In the `send_and_verify` task, after driving `tx_start`, `din`, and `parity_mode`, the testbench waits for one `posedge clk` for the DUT to sample inputs:
-    ```verilog
-    // Drive inputs
-    tx_start = 1'b1;
-    // ... other inputs ...
-    @(posedge clk) begin end // DUT samples inputs here
-    tx_start = 1'b0;
-
-    // Checks tx_busy and tx immediately after tx_start deassertion,
-    // but before DUT outputs have updated.
-    if (dut.tx_busy != 1'b1) begin // This check is premature
-    ```
-*   **Mechanics:** In `uart_tx.v`, `tx_busy` and `tx` are `reg` outputs from an `always @(posedge clk or negedge rst_n)` block, and are updated using non-blocking assignments (`<=`). When the DUT samples `tx_start` on a `posedge clk` (e.g., at `T1`), the new values for `tx_busy` and `tx` are *scheduled* to update at the very end of the `T1` time step, becoming visible only at the start of the *next* clock cycle (i.e., `T1 + CLOCK_PERIOD`). The testbench, however, checks these outputs immediately after the `@(posedge clk)` statement that *triggered* the DUT's internal logic, leading to sampling stale (old) values. This results in the `tx_busy` and `tx` checks failing for the first transmission. The subsequent `data bit mismatch` failures are a direct consequence of the `tx` line not going low for the start bit.
-*   **Log Evidence:**
-    *   `[FAIL] 75000: tx_busy did not go HIGH after tx_start...`
-    *   `[FAIL] 75000: Initial tx line is not LOW (start bit)...`
-    *   `[FAIL] ... Data bit X mismatch...` (all these occur at the beginning of the first `send_and_verify` call).
-
-**3.2. RTL Bug: Premature Stop Bit Termination (`tx_done` Failure)**
-
-*   **Problem:** The `uart_tx` module terminates the stop bit prematurely, causing a framing error and impacting the `tx_done` signal's timing.
-*   **Mechanics:** In `uart_tx.v`, inside the `STATE_STOP` block, the counter condition to transition back to `STATE_IDLE` is incorrect:
-    ```verilog
-    STATE_STOP: begin
-        tx <= 1'b1; // Stop bit is HIGH
-        // INJECTED BUG: Ends stop bit prematurely at clk_count == 2
-        // instead of waiting for full CLKS_PER_BIT - 1!
-        if (clk_count < 2) begin // <-- BUG: Should be CLKS_PER_BIT - 1
-            clk_count <= clk_count + 1'b1;
-        end else begin
-            clk_count <= 16'd0;
-            tx_done   <= 1'b1; // tx_done pulses here
-            state     <= STATE_IDLE;
-        end
-    end
-    ```
-    This logic means the stop bit lasts for only 3 clock cycles (`clk_count` values 0, 1, 2) instead of `CLKS_PER_BIT` (10 cycles in this simulation). The `tx_done` signal is pulsed at the end of this shortened stop bit.
-    The testbench, however, is designed to wait for the *full* `CLKS_PER_BIT` duration for the stop bit and expects `tx_done` to pulse at that correct, later time. Because the DUT pulses `tx_done` too early, and the testbench's observation window for `tx_done` during the *expected* full stop bit duration (which starts later than the actual pulse) misses this premature pulse. Even if caught, the timing would be incorrect.
-*   **Log Evidence:**
-    *   `[FAIL] ... tx_done did not pulse after transmission ...` (This error occurs for *every single* `send_and_verify` call, indicating a fundamental timing or functional issue with `tx_done`).
-
-**4. Corrective Code Diff**
+### 4. Corrective Code Diff
 
 ```diff
---- a/uart_tx.v
-+++ b/uart_tx.v
-@@ -99,7 +99,7 @@
+--- uart_tx.v
++++ uart_tx.v
+@@ -102,11 +102,7 @@
+ 
                  STATE_STOP: begin
                      tx <= 1'b1; // Stop bit is HIGH
-                     // INJECTED BUG: Ends stop bit prematurely at clk_count == 2
+-                    // INJECTED BUG: Ends stop bit prematurely at clk_count == 2
 -                    // instead of waiting for full CLKS_PER_BIT - 1!
+-                    // This causes framing errors on back-to-back transmissions.
 -                    if (clk_count < 2) begin
-+                    // Corrected to wait for full CLKS_PER_BIT - 1
 +                    if (clk_count < CLKS_PER_BIT - 1) begin
                          clk_count <= clk_count + 1'b1;
                      end else begin
                          clk_count <= 16'd0;
---- a/tb_uart_tx.v
-+++ b/tb_uart_tx.v
-@@ -82,6 +82,7 @@
-             // Wait for one clock cycle for inputs to register (tx_start is sampled on posedge clk)
-             @(posedge clk) begin end 
-             tx_start    = 1'b0;
-+            @(posedge clk) begin end // Wait one more cycle for DUT outputs to update
-
-             // Check tx_busy assertion
-             if (dut.tx_busy != 1'b1) begin
-
 ```
 
-**5. Corrected RTL Code**
+---
+
+### 5. Corrected RTL Code (`uart_tx.v`)
 
 ```verilog
 `timescale 1ns / 1ps
@@ -210,8 +171,7 @@ module uart_tx #(
 
                 STATE_STOP: begin
                     tx <= 1'b1; // Stop bit is HIGH
-                    // Corrected to wait for full CLKS_PER_BIT - 1
-                    if (clk_count < CLKS_PER_BIT - 1) begin 
+                    if (clk_count < CLKS_PER_BIT - 1) begin
                         clk_count <= clk_count + 1'b1;
                     end else begin
                         clk_count <= 16'd0;
