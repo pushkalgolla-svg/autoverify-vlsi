@@ -1,0 +1,18 @@
+# Environment & secrets
+.env
+*.env
+
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Simulator outputs & binaries
+*.vvp
+*.vcd
+*.log
+*.bak
+logs/*.vvp
+logs/*.log
+logs/*.vcd
