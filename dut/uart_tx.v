@@ -4,7 +4,7 @@
  * UART Transmitter with Configurable Baud Rate and Parity
  *
  * Parameters:
- *   CLKS_PER_BIT : Clock cycles per baud period (default 10 for fast simulation)
+ *   CLKS_PER_BIT : Clock cycles per baud period (default 10 for simulation)
  *
  * States:
  *   IDLE, START, DATA, PARITY, STOP
@@ -36,10 +36,6 @@ module uart_tx #(
     reg [7:0]  tx_data;
     reg        parity_bit;
 
-    // Parity calculation
-    wire parity_odd  = ~(^tx_data);
-    wire parity_even = ^tx_data;
-
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state      <= STATE_IDLE;
@@ -47,11 +43,11 @@ module uart_tx #(
             bit_index  <= 3'd0;
             tx_data    <= 8'd0;
             parity_bit <= 1'b0;
-            tx         <= 1'b1; // Idle line is HIGH
+            tx         <= 1'b1; // Idle UART line is HIGH
             tx_busy    <= 1'b0;
             tx_done    <= 1'b0;
         end else begin
-            tx_done <= 1'b0; // Default pulse
+            tx_done <= 1'b0; // Default single-cycle pulse
 
             case (state)
                 STATE_IDLE: begin
@@ -61,15 +57,15 @@ module uart_tx #(
                     bit_index <= 3'd0;
 
                     if (tx_start) begin
-                        tx_data    <= din;
-                        tx_busy    <= 1'b1;
-                        tx         <= 1'b0; // Start bit is LOW
-                        state      <= STATE_START;
-                        
+                        tx_data   <= din;
+                        tx_busy   <= 1'b1;
+                        tx        <= 1'b0; // Drive Start bit (LOW)
+                        state     <= STATE_START;
+
                         if (parity_mode == 2'b01)
-                            parity_bit <= ~(^din);
+                            parity_bit <= ~(^din); // Odd parity
                         else if (parity_mode == 2'b10)
-                            parity_bit <= ^din;
+                            parity_bit <= ^din;    // Even parity
                         else
                             parity_bit <= 1'b0;
                     end
@@ -81,24 +77,28 @@ module uart_tx #(
                         clk_count <= clk_count + 1'b1;
                     end else begin
                         clk_count <= 16'd0;
+                        tx        <= tx_data[0]; // Drive first data bit
                         state     <= STATE_DATA;
                     end
                 end
 
                 STATE_DATA: begin
-                    tx <= tx_data[bit_index];
                     if (clk_count < CLKS_PER_BIT - 1) begin
                         clk_count <= clk_count + 1'b1;
                     end else begin
                         clk_count <= 16'd0;
                         if (bit_index < 3'd7) begin
                             bit_index <= bit_index + 1'b1;
+                            tx        <= tx_data[bit_index + 1];
                         end else begin
                             bit_index <= 3'd0;
-                            if (parity_mode != 2'b00)
+                            if (parity_mode != 2'b00) begin
+                                tx    <= parity_bit;
                                 state <= STATE_PARITY;
-                            else
+                            end else begin
+                                tx    <= 1'b1; // Drive Stop bit (HIGH)
                                 state <= STATE_STOP;
+                            end
                         end
                     end
                 end
@@ -109,20 +109,19 @@ module uart_tx #(
                         clk_count <= clk_count + 1'b1;
                     end else begin
                         clk_count <= 16'd0;
+                        tx        <= 1'b1; // Drive Stop bit (HIGH)
                         state     <= STATE_STOP;
                     end
                 end
 
                 STATE_STOP: begin
                     tx <= 1'b1; // Stop bit is HIGH
-                    // INJECTED BUG: Ends stop bit prematurely at clk_count == 2
-                    // instead of waiting for full CLKS_PER_BIT - 1!
-                    // This causes framing errors on back-to-back transmissions.
-                    if (clk_count < 2) begin
+                    if (clk_count < CLKS_PER_BIT - 1) begin
                         clk_count <= clk_count + 1'b1;
                     end else begin
                         clk_count <= 16'd0;
                         tx_done   <= 1'b1;
+                        tx_busy   <= 1'b0;
                         state     <= STATE_IDLE;
                     end
                 end

@@ -21,16 +21,16 @@ module sync_fifo #(
     parameter DATA_WIDTH = 8,
     parameter DEPTH      = 16
 ) (
-    input  wire                  clk,
-    input  wire                  rst_n,
-    input  wire                  wr_en,
-    input  wire [DATA_WIDTH-1:0] din,
-    input  wire                  rd_en,
-    output reg  [DATA_WIDTH-1:0] dout,
-    output wire                  full,
-    output wire                  empty,
-    output reg                   overflow,
-    output reg                   underflow,
+    input  wire                   clk,
+    input  wire                   rst_n,
+    input  wire                   wr_en,
+    input  wire [DATA_WIDTH-1:0]  din,
+    input  wire                   rd_en,
+    output reg  [DATA_WIDTH-1:0]  dout,
+    output wire                   full,
+    output wire                   empty,
+    output reg                    overflow,
+    output reg                    underflow,
     output reg  [$clog2(DEPTH):0] count
 );
 
@@ -52,11 +52,11 @@ module sync_fifo #(
             wr_ptr    <= {ADDR_WIDTH{1'b0}};
             rd_ptr    <= {ADDR_WIDTH{1'b0}};
             dout      <= {DATA_WIDTH{1'b0}};
-            count     <= 0;
+            count     <= {($clog2(DEPTH)+1){1'b0}};
             overflow  <= 1'b0;
             underflow <= 1'b0;
         end else begin
-            // Reset pulse error flags each cycle unless re-triggered
+            // Reset single-cycle pulse error flags unless re-triggered
             overflow  <= 1'b0;
             underflow <= 1'b0;
 
@@ -64,7 +64,7 @@ module sync_fifo #(
                 2'b10: begin // Write only
                     if (!full) begin
                         mem[wr_ptr] <= din;
-                        wr_ptr      <= wr_ptr + 1'b1;
+                        wr_ptr      <= (wr_ptr == DEPTH - 1) ? {ADDR_WIDTH{1'b0}} : wr_ptr + 1'b1;
                         count       <= count + 1'b1;
                     end else begin
                         overflow    <= 1'b1;
@@ -74,7 +74,7 @@ module sync_fifo #(
                 2'b01: begin // Read only
                     if (!empty) begin
                         dout        <= mem[rd_ptr];
-                        rd_ptr      <= rd_ptr + 1'b1;
+                        rd_ptr      <= (rd_ptr == DEPTH - 1) ? {ADDR_WIDTH{1'b0}} : rd_ptr + 1'b1;
                         count       <= count - 1'b1;
                     end else begin
                         underflow   <= 1'b1;
@@ -82,23 +82,29 @@ module sync_fifo #(
                 end
 
                 2'b11: begin // Simultaneous Write and Read
-                    // Handled correctly: count unchanged, write and read both advance
-                    // BUT: INJECTED BUG when FIFO is empty:
-                    // If empty, reading should be disallowed and count should increment by 1.
-                    // BUG: We allow reading uninitialized memory and decrement count, corrupting the pointer!
-                    mem[wr_ptr] <= din;
-                    wr_ptr      <= wr_ptr + 1'b1;
-                    dout        <= mem[rd_ptr];
-                    rd_ptr      <= rd_ptr + 1'b1;
                     if (empty) begin
-                        // Corner-case bug: underflow is asserted, but count wraps negatively
-                        underflow <= 1'b1;
-                        count     <= count - 1'b1; // BUG: Underflows the counter when empty!
+                        // FIFO empty: Write succeeds, read fails with underflow
+                        mem[wr_ptr] <= din;
+                        wr_ptr      <= (wr_ptr == DEPTH - 1) ? {ADDR_WIDTH{1'b0}} : wr_ptr + 1'b1;
+                        count       <= count + 1'b1;
+                        underflow   <= 1'b1;
+                    end else if (full) begin
+                        // FIFO full: Read succeeds, write fails with overflow
+                        dout        <= mem[rd_ptr];
+                        rd_ptr      <= (rd_ptr == DEPTH - 1) ? {ADDR_WIDTH{1'b0}} : rd_ptr + 1'b1;
+                        count       <= count - 1'b1;
+                        overflow    <= 1'b1;
+                    end else begin
+                        // Normal simultaneous write and read: count remains unchanged
+                        mem[wr_ptr] <= din;
+                        wr_ptr      <= (wr_ptr == DEPTH - 1) ? {ADDR_WIDTH{1'b0}} : wr_ptr + 1'b1;
+                        dout        <= mem[rd_ptr];
+                        rd_ptr      <= (rd_ptr == DEPTH - 1) ? {ADDR_WIDTH{1'b0}} : rd_ptr + 1'b1;
                     end
                 end
 
                 default: begin
-                    // No operation
+                    // No operation (2'b00)
                 end
             endcase
         end

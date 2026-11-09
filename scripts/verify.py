@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-AutoVerify-VLSI: Autonomous LLM-Orchestrated Verification & Self-Healing Framework
-Pairs Gemini API with Icarus Verilog (iverilog) & GTKWave for digital RTL IP cores.
+AutoVerify-VLSI: Automated RTL Verification & Diagnostic Framework
+Pairs Icarus Verilog (iverilog) & GTKWave with optional Google Gemini API
+for digital RTL IP cores (ALU, Parameterized Sync FIFO, UART Transmitter).
 """
 
 import os
 import re
 import sys
+import difflib
 import shutil
 import warnings
 import argparse
@@ -40,27 +42,38 @@ def load_env():
                     if key and val and key not in os.environ:
                         os.environ[key] = val
 
-def get_api_key():
-    """Get Gemini API key from environment or .env."""
+def get_api_key(required: bool = True):
+    """Get Gemini API key from environment or .env file."""
     load_env()
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        print("\n" + "="*60)
+    if not api_key and required:
+        print("\n" + "=" * 65)
         print(" [ERROR] GEMINI_API_KEY is not set.")
-        print(f" Please add it to: {ENV_FILE}")
-        print("="*60 + "\n")
+        print(f" To use AI features, add it to {ENV_FILE} or set as environment variable.")
+        print(" To run verification locally without AI, use the '--no-ai' flag.")
+        print("=" * 65 + "\n")
         sys.exit(1)
     return api_key
 
-def find_tool(tool_name):
-    """Find binary on PATH or local fallback installation."""
+def find_tool(tool_name: str) -> str:
+    """Find EDA binary on PATH or common local installation paths."""
     found = shutil.which(tool_name)
     if found:
         return found
-    local_bin = Path(os.environ.get("USERPROFILE", "")) / "iverilog" / "bin" / f"{tool_name}.exe"
-    if local_bin.exists():
-        return str(local_bin)
-    raise FileNotFoundError(f"Could not locate '{tool_name}'. Ensure Icarus Verilog is installed.")
+    candidates = [
+        Path(os.environ.get("USERPROFILE", "")) / "iverilog" / "bin" / f"{tool_name}.exe",
+        Path("C:/iverilog/bin") / f"{tool_name}.exe",
+        Path("C:/Program Files/iverilog/bin") / f"{tool_name}.exe",
+    ]
+    for cand in candidates:
+        if cand.exists():
+            return str(cand)
+    raise FileNotFoundError(
+        f"Could not locate required EDA tool '{tool_name}'.\n"
+        "Please ensure Icarus Verilog is installed and added to PATH.\n"
+        "Linux: sudo apt-get install -y iverilog\n"
+        "Windows: winget install Icarus.Verilog (or add iverilog/bin to Path)"
+    )
 
 def clean_code_block(text: str) -> str:
     """Extract code from markdown code fences and sanitize invalid literals."""
@@ -68,7 +81,6 @@ def clean_code_block(text: str) -> str:
     match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
     code = match.group(1).strip() if match else text.strip()
 
-    # Sanitize invalid binary literals like 2'b03 or 2'b2 -> 2'd3 or 2'd2
     def fix_binary_literal(m):
         width, digits = m.group(1), m.group(2)
         if all(c in '01xzXZ_' for c in digits):
@@ -78,10 +90,10 @@ def clean_code_block(text: str) -> str:
     code = re.sub(r"(\d+)'b([0-9]+)", fix_binary_literal, code)
     return code
 
-def generate_with_fallback(prompt: str, preferred_model: str = "gemini-3.5-flash-lite"):
-    """Call Gemini API with automatic fallback across free-tier models on quota limits."""
+def generate_with_fallback(prompt: str, preferred_model: str = "gemini-2.5-flash"):
+    """Call Gemini API with automatic fallback across models on quota limits."""
     import google.generativeai as genai
-    model_candidates = [preferred_model, "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-2.5-flash"]
+    model_candidates = [preferred_model, "gemini-2.5-flash", "gemini-2.5-flash-lite"]
     unique_models = []
     for m in model_candidates:
         if m not in unique_models:
@@ -102,37 +114,41 @@ def generate_with_fallback(prompt: str, preferred_model: str = "gemini-3.5-flash
     raise last_error
 
 def extract_corrected_code(analysis_text: str) -> str:
-    """Extract full corrected Verilog code from Gemini's response."""
-    blocks = re.findall(r"```(?:verilog|systemverilog)?\s*(.*?module\s+.*?\bendmodule)\s*```", analysis_text, re.DOTALL | re.IGNORECASE)
+    """Extract full corrected Verilog module code from Gemini response."""
+    blocks = re.findall(
+        r"```(?:verilog|systemverilog)?\s*(module\s+.*?\bendmodule)\s*```",
+        analysis_text,
+        re.DOTALL | re.IGNORECASE
+    )
     if blocks:
         return blocks[-1].strip()
     return ""
 
-def run_pipeline(dut_path: Path, model_name: str = "gemini-3.5-flash-lite", auto_heal: bool = False, max_retries: int = 2):
+def remove_stale_artifacts(module_name: str):
+    """Remove previous simulation executables, logs, and traces to prevent stale results."""
+    stale_files = [
+        LOGS_DIR / f"{module_name}_sim.vvp",
+        LOGS_DIR / f"{module_name}_sim.log",
+        LOGS_DIR / f"{module_name}.vcd",
+        LOGS_DIR / f"{module_name}_report.md",
+        LOGS_DIR / f"{module_name}_patch.diff"
+    ]
+    for f in stale_files:
+        if f.exists():
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+def synthesize_testbench_ai(dut_path: Path, tb_path: Path, model_name: str) -> bool:
+    """Synthesize testbench using Gemini API with strict Verilog-2001 constraints."""
     module_name = dut_path.stem
-    tb_path = TB_DIR / f"tb_{module_name}.v"
-    sim_bin = LOGS_DIR / f"{module_name}_sim.vvp"
-    sim_log = LOGS_DIR / f"{module_name}_sim.log"
-    vcd_path = LOGS_DIR / f"{module_name}.vcd"
-    report_file = LOGS_DIR / f"{module_name}_report.md"
-
-    TB_DIR.mkdir(parents=True, exist_ok=True)
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-    iverilog_bin = find_tool("iverilog")
-    vvp_bin = find_tool("vvp")
-
-    print("\n" + "=" * 65)
-    print(f" AutoVerify-VLSI: Verifying Module [{dut_path.name}] ")
-    print("=" * 65)
-
     with open(dut_path, "r", encoding="utf-8") as f:
         dut_code = f.read()
 
-    # Step 1: Prompt Gemini for Testbench
     print(f"\n[1/4] Generating Constrained-Random & Corner-Case Testbench for {dut_path.name}...")
     prompt = f"""You are a Principal ASIC/FPGA Verification Engineer specializing in SystemVerilog.
-Generate a comprehensive, self-checking Verilog/SystemVerilog testbench for the following Design Under Test (DUT).
+Generate a comprehensive, self-checking Verilog testbench for the following Design Under Test (DUT).
 
 DUT File: {dut_path.name}
 ```verilog
@@ -143,136 +159,170 @@ Requirements for the testbench:
 1. Target simulator: Icarus Verilog (`iverilog`).
    STRICT SYNTAX RULES for 100% Icarus Verilog compatibility:
    - Use standard Verilog-2001 syntax ONLY.
-   - NEVER use C-style curly braces '{{' or '}}' for blocks, if-else, or loops! Always use 'begin' and 'end'. (Curly braces in Verilog are ONLY for concatenation like {{a, b}}).
-   - Do NOT use SystemVerilog keywords (NO `logic`, NO `string` arguments in tasks, NO `automatic` tasks, NO classes, NO `$srandom`).
+   - NEVER use C-style curly braces '{{' or '}}' for blocks, if-else, or loops! Always use 'begin' and 'end'.
+   - Do NOT use SystemVerilog keywords (NO `logic`, NO `string` arguments in tasks, NO classes).
    - Use only standard `reg`, `wire`, and `integer`.
-   - Declare internal test variables at the module level or at the top of initial blocks.
+   - Declare internal test variables at module level or top of blocks.
    - For random values, use `$random` or `$urandom`.
-   - Ensure all binary literals ('b) contain only 0 and 1 (use 2'b11 or 2'd3, never 2'b03).
+   - Ensure all binary literals ('b) contain only 0 and 1.
    - MANDATORY WATCHDOG: Always include a safety watchdog timer to prevent infinite hangs:
-     `initial begin #2000000; $display("[ERROR] Watchdog timeout: simulation hung!"); $finish; end`
-   - AVOID DEADLOCKS: Never use unbounded `@(posedge signal)` waits. Instead use timeout-guarded loops or bounded delays.
+     `initial begin #5000000; $display("[ERROR] Watchdog timeout: simulation hung!"); $finish; end`
+   - AVOID RACE CONDITIONS: Drive sequential inputs on `@(negedge clk)` and sample DUT outputs at `@(posedge clk)` with `#1` delay or at `@(negedge clk)`.
 2. Instantiate the DUT with instance name `dut`.
-3. Include a clock generator (`always #5 clk = ~clk;`) and proper synchronous active-low reset initialization if sequential.
+3. Include clock generator (`always #5 clk = ~clk;`) and synchronous/asynchronous reset initialization.
 4. Comprehensive test scenarios:
-   - Reset verification and default state check.
-   - Directed nominal tests covering all modes/opcodes/operations.
-   - Corner cases and edge conditions (e.g. boundary values, overflow/underflow, simultaneous operations).
-   - Constrained-random stress testing using randomized loops if applicable.
+   - Reset state verification.
+   - Directed nominal tests covering all operations.
+   - Corner cases and edge conditions (overflow, underflow, boundary limits).
+   - Constrained-random stress testing.
 5. In each test case:
    - Self-check expected results against DUT outputs.
    - Print `[PASS] <description>` when matching.
    - Print `[FAIL] <description> Expected: ... Got: ...` on mismatch and increment `error_count`.
-6. Enable VCD waveform dumping at the start of initial block:
-   `$dumpfile("{vcd_path.as_posix()}"); $dumpvars(0, tb_{module_name});`
+6. Enable VCD waveform dumping:
+   `$dumpfile("logs/{module_name}.vcd"); $dumpvars(0, tb_{module_name});`
 7. At completion:
    - If `error_count == 0`, display `ALL TESTS PASSED`.
    - If `error_count > 0`, display `SIMULATION FAILED: Total Errors = %0d` with error_count.
    - Call `$finish;` to terminate cleanly.
-8. Output ONLY the Verilog code enclosed within a single ```verilog ``` markdown block.
+8. Output ONLY the Verilog code enclosed within a single ```verilog ``` block.
 """
-
-    response = generate_with_fallback(prompt, preferred_model=model_name)
-    tb_code = clean_code_block(response.text)
-
-    with open(tb_path, "w", encoding="utf-8") as f:
-        f.write(tb_code)
-    print(f"[1/4] Saved testbench to: {tb_path.name}")
-
-    # Step 2: Compile with iverilog (with auto-fix retry if syntax error occurs)
-    print(f"\n[2/4] Compiling design with Icarus Verilog (`iverilog -g2012`)...")
-    compile_cmd = [iverilog_bin, "-g2012", "-o", str(sim_bin), str(dut_path), str(tb_path)]
-    comp_result = subprocess.run(compile_cmd, capture_output=True, text=True)
-
-    if comp_result.returncode != 0:
-        print(f"[!] Compilation failed. Prompting Gemini to fix testbench syntax...")
-        fix_tb_prompt = f"""The following testbench failed to compile with Icarus Verilog:
-```verilog
-{tb_code}
-```
-Compiler Error:
-{comp_result.stderr}
-
-Please fix the testbench for Icarus Verilog:
-- NEVER use C-style curly braces '{{' or '}}' for blocks or loops; use 'begin' and 'end' ONLY.
-- Ensure all variable declarations in tasks and functions are at the VERY BEGINNING of the task/function block before any statements.
-- Return ONLY the complete corrected Verilog code in a ```verilog ``` block.
-"""
-        fixed_resp = generate_with_fallback(fix_tb_prompt, preferred_model=model_name)
-        tb_code = clean_code_block(fixed_resp.text)
+    try:
+        response = generate_with_fallback(prompt, preferred_model=model_name)
+        tb_code = clean_code_block(response.text)
         with open(tb_path, "w", encoding="utf-8") as f:
             f.write(tb_code)
-        
-        comp_result = subprocess.run(compile_cmd, capture_output=True, text=True)
-        if comp_result.returncode != 0:
-            print(f"[ERROR] Compilation still failed after retry:\n{comp_result.stderr}")
-            return False
+        print(f"[1/4] Saved AI-generated testbench to: {tb_path.name}")
+        return True
+    except Exception as e:
+        print(f"[ERROR] AI testbench generation failed: {e}")
+        return False
+
+def run_pipeline(
+    dut_path: Path,
+    no_ai: bool = False,
+    regen_tb: bool = False,
+    model_name: str = "gemini-2.5-flash",
+    auto_heal: bool = False,
+    apply_candidate: bool = False
+) -> bool:
+    """Run full verification pipeline on a single DUT."""
+    module_name = dut_path.stem
+    tb_path = TB_DIR / f"tb_{module_name}.v"
+    sim_bin = LOGS_DIR / f"{module_name}_sim.vvp"
+    sim_log = LOGS_DIR / f"{module_name}_sim.log"
+    vcd_path = LOGS_DIR / f"{module_name}.vcd"
+    report_file = LOGS_DIR / f"{module_name}_report.md"
+
+    TB_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 0. Clean stale compilation and simulation artifacts
+    remove_stale_artifacts(module_name)
+
+    iverilog_bin = find_tool("iverilog")
+    vvp_bin = find_tool("vvp")
+
+    print("\n" + "=" * 65)
+    print(f" AutoVerify-VLSI: Verifying Module [{dut_path.name}] ")
+    print("=" * 65)
+
+    # 1. Obtain Testbench
+    if not tb_path.exists() or regen_tb:
+        if no_ai:
+            if not tb_path.exists():
+                print(f"[ERROR] Testbench '{tb_path.name}' not found and '--no-ai' is specified.")
+                print(f"Please provide '{tb_path}' or run without '--no-ai' to synthesize one.")
+                return False
+        else:
+            success = synthesize_testbench_ai(dut_path, tb_path, model_name)
+            if not success and not tb_path.exists():
+                return False
+    else:
+        print(f"[1/4] Using validated testbench: testbenches/{tb_path.name}")
+
+    # 2. Compile Design
+    print(f"\n[2/4] Compiling design with Icarus Verilog (`iverilog -g2012`)...")
+    compile_cmd = [iverilog_bin, "-g2012", "-o", str(sim_bin), str(dut_path), str(tb_path)]
+    try:
+        comp_result = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        print("[ERROR] Compilation timed out after 20 seconds.")
+        return False
+
+    if comp_result.returncode != 0 or not sim_bin.exists():
+        print(f"[ERROR] Compilation failed (exit code {comp_result.returncode}):")
+        print(comp_result.stderr or comp_result.stdout)
+        return False
 
     print("[2/4] Compilation passed!")
 
-    # Step 3: Run simulation with vvp (with timeout guard)
+    # 3. Run Simulation
     print(f"\n[3/4] Running simulation with vvp...")
     sim_cmd = [vvp_bin, str(sim_bin)]
+    timed_out = False
     try:
-        sim_result = subprocess.run(sim_cmd, capture_output=True, text=True, timeout=12)
+        sim_result = subprocess.run(sim_cmd, capture_output=True, text=True, timeout=15)
         sim_output = sim_result.stdout + sim_result.stderr
-        returncode = sim_result.returncode
+        sim_code = sim_result.returncode
     except subprocess.TimeoutExpired as e:
-        print("\n[!] Simulation exceeded timeout (12s). Deadlock or missing handshake detected!")
-        sim_output = (e.stdout or "") + (e.stderr or "") + "\n[FAIL] Simulation timed out: possible infinite loop or missed pulse event."
-        returncode = 1
+        timed_out = True
+        sim_output = (e.stdout or "") + (e.stderr or "") + "\n[ERROR] Simulation timed out (15s): Watchdog or deadlock triggered."
+        sim_code = 1
 
     with open(sim_log, "w", encoding="utf-8") as f:
         f.write(sim_output)
 
     print("\n--- Simulation Output Highlights ---")
     lines = sim_output.strip().splitlines()
-    for line in lines[:20]:
+    for line in lines[:25]:
         print(line)
-    if len(lines) > 20:
-        print(f"... [{len(lines)-20} more lines in logs/{sim_log.name}]")
+    if len(lines) > 25:
+        print(f"... [{len(lines)-25} more lines in logs/{sim_log.name}]")
     print("------------------------------------\n")
 
-    # Check if simulation failed to execute due to testbench error
-    if "Program not runnable" in sim_output or "Error:" in sim_output and "[FAIL]" not in sim_output:
-        print(f"[!] Testbench runtime error detected. Re-prompting Gemini to fix testbench...")
-        fix_prompt = f"""The testbench produced a runtime simulator error in Icarus Verilog:
-{sim_output}
+    # 4. Check for Failures & Exit Codes
+    error_count = 0
+    err_matches = re.findall(r"Total Errors\s*=\s*(\d+)", sim_output)
+    if err_matches:
+        error_count = int(err_matches[-1])
 
-Please fix the testbench:
-- Do not use unsupported system tasks like $srandom. Use $random or $urandom.
-- Ensure all variable declarations are at the top of tasks/functions.
-- Return ONLY the corrected Verilog code in a ```verilog ``` block.
-"""
-        fixed_resp = generate_with_fallback(fix_prompt, preferred_model=model_name)
-        tb_code = clean_code_block(fixed_resp.text)
-        with open(tb_path, "w", encoding="utf-8") as f:
-            f.write(tb_code)
-        # Re-compile and re-run
-        subprocess.run(compile_cmd, capture_output=True, text=True)
-        sim_result = subprocess.run(sim_cmd, capture_output=True, text=True)
-        sim_output = sim_result.stdout + sim_result.stderr
-        with open(sim_log, "w", encoding="utf-8") as f:
-            f.write(sim_output)
-
-    # Step 4: Check for Failures & Feedback Loop
     has_failure = (
+        error_count > 0 or
+        sim_code != 0 or
+        timed_out or
         "[FAIL]" in sim_output or
         "[ERROR]" in sim_output or
         "SIMULATION FAILED" in sim_output or
-        "FAILED" in sim_output or
-        "timed out" in sim_output or
-        "simulation hung" in sim_output.lower() or
-        returncode != 0
+        "ALL TESTS PASSED" not in sim_output
     )
 
     if not has_failure:
-        print(f"\n🎉 [SUCCESS] All verification tests passed for {dut_path.name}! (0 errors)")
-        print(f"📊 Waveform dumped to: {vcd_path}")
-        print(f"   View in GTKWave: gtkwave \"{vcd_path}\"")
+        print(f"🎉 [SUCCESS] All verification tests passed for {dut_path.name}! (0 errors)")
+        if vcd_path.exists():
+            print(f"📊 Waveform dumped to: {vcd_path}")
+            print(f"   View in GTKWave: gtkwave \"{vcd_path}\"")
         return True
 
-    print(f"\n[4/4] ⚠️ Bugs detected during simulation! Engaging Gemini for Root-Cause Analysis...")
+    print(f"\n[4/4] ⚠️ Failure detected in {dut_path.name}!")
+    print(f"      Exit code: {sim_code} | Total recorded errors: {error_count or 'N/A'}")
+
+    if no_ai:
+        print("[INFO] AI diagnostic skipped ('--no-ai' flag active).")
+        return False
+
+    # Optional AI Diagnostic Analysis
+    api_key = get_api_key(required=False)
+    if not api_key:
+        print("[INFO] GEMINI_API_KEY not set. Skipping AI root-cause diagnostics.")
+        return False
+
+    with open(dut_path, "r", encoding="utf-8") as f:
+        dut_code = f.read()
+    with open(tb_path, "r", encoding="utf-8") as f:
+        tb_code = f.read()
+
+    print("\n[AI DIAGNOSTICS] Engaging Gemini for Root-Cause Analysis...")
     analysis_prompt = f"""You are a Principal ASIC/FPGA Verification Engineer.
 A Verilog simulation failed. Analyze the RTL, the testbench, and the simulation log to diagnose the bug.
 
@@ -290,36 +340,54 @@ Please provide a structured report with:
 2. Root Cause Classification: State clearly whether the bug is in the **RTL Design** or in the **Testbench**.
 3. Detailed Technical Explanation: Pinpoint exact lines and logical mechanics causing the failure.
 4. Corrective Code Diff: Show the unified diff.
-5. Corrected RTL Code: Provide the COMPLETE, bug-free `{dut_path.name}` enclosed in a ```verilog ``` block so it can be automatically applied.
+5. Corrected RTL Code: Provide the COMPLETE, bug-free `{dut_path.name}` enclosed in a ```verilog ``` block.
 """
+    try:
+        analysis_response = generate_with_fallback(analysis_prompt, preferred_model=model_name)
+        report_text = analysis_response.text
+        with open(report_file, "w", encoding="utf-8") as f:
+            f.write(report_text)
 
-    analysis_response = generate_with_fallback(analysis_prompt, preferred_model=model_name)
-    report_text = analysis_response.text
+        print("\n" + "=" * 65)
+        print(" GEMINI ROOT-CAUSE ANALYSIS & DIAGNOSTIC REPORT ")
+        print("=" * 65)
+        print(report_text)
+        print("=" * 65)
+        print(f"\nDiagnostic report saved to: {report_file}")
 
-    with open(report_file, "w", encoding="utf-8") as f:
-        f.write(report_text)
-
-    print("\n" + "=" * 65)
-    print(" GEMINI ROOT-CAUSE ANALYSIS & DIAGNOSTIC REPORT ")
-    print("=" * 65)
-    print(report_text)
-    print("=" * 65)
-    print(f"\nDiagnostic report saved to: {report_file}")
-
-    # Autonomous Self-Healing Option
-    if auto_heal:
-        print(f"\n[SELF-HEALING] --auto-heal enabled. Extracting patch from Gemini...")
+        # Save AI Candidate Fix (Never overwrite validated RTL automatically)
         fixed_code = extract_corrected_code(report_text)
-        if fixed_code and max_retries > 0:
-            backup_path = dut_path.with_suffix(".v.bak")
-            shutil.copyfile(dut_path, backup_path)
-            print(f"[SELF-HEALING] Backup created at: {backup_path.name}")
-            with open(dut_path, "w", encoding="utf-8") as f:
+        if fixed_code:
+            candidate_path = DUT_DIR / f"{module_name}_candidate.v"
+            patch_path = LOGS_DIR / f"{module_name}_patch.diff"
+
+            with open(candidate_path, "w", encoding="utf-8") as f:
                 f.write(fixed_code)
-            print(f"[SELF-HEALING] Applied fix to {dut_path.name}. Re-running verification...")
-            return run_pipeline(dut_path, model_name=model_name, auto_heal=False, max_retries=max_retries-1)
-        else:
-            print("[SELF-HEALING] Could not extract complete corrected RTL module. Manual review recommended.")
+
+            diff = difflib.unified_diff(
+                dut_code.splitlines(keepends=True),
+                fixed_code.splitlines(keepends=True),
+                fromfile=f"a/{dut_path.name}",
+                tofile=f"b/{dut_path.name}"
+            )
+            diff_text = "".join(diff)
+            with open(patch_path, "w", encoding="utf-8") as f:
+                f.write(diff_text)
+
+            print(f"\n[CANDIDATE FIX] Proposed RTL fix isolated at: {candidate_path}")
+            print(f"[CANDIDATE FIX] Unified diff saved at: {patch_path}")
+
+            if auto_heal and apply_candidate:
+                backup_path = dut_path.with_suffix(".v.bak")
+                shutil.copyfile(dut_path, backup_path)
+                with open(dut_path, "w", encoding="utf-8") as f:
+                    f.write(fixed_code)
+                print(f"[SELF-HEALING] Replaced {dut_path.name} with candidate (backup: {backup_path.name}). Re-verifying...")
+                return run_pipeline(dut_path, no_ai=True)
+            elif auto_heal:
+                print("[NOTICE] Auto-heal candidate generated for review. Pass '--apply-candidate' to overwrite validated RTL.")
+    except Exception as e:
+        print(f"[!] AI Diagnostic generation failed: {e}")
 
     return False
 
@@ -345,7 +413,7 @@ def generate_dashboard(results: list):
     for r in results:
         status_badge = "✅ PASSED" if r["status"] == "PASSED" else "❌ FAILED"
         vcd_link = f"[`{r['module']}.vcd`](file:///{r['vcd'].as_posix()})" if r['vcd'].exists() else "N/A"
-        diag_link = f"[`Report`](file:///{r['report'].as_posix()})" if r['report'].exists() else "N/A"
+        diag_link = f"[`Report`](file:///{r['report'].as_posix()})" if r['report'].exists() else "None (Clean)"
         md_content += f"| **{r['module']}** | {status_badge} | {r['errors']} | {vcd_link} | {diag_link} |\n"
 
     with open(md_file, "w", encoding="utf-8") as f:
@@ -390,7 +458,7 @@ def generate_dashboard(results: list):
     for r in results:
         badge = '<span class="badge-pass">PASSED</span>' if r["status"] == "PASSED" else '<span class="badge-fail">FAILED</span>'
         vcd_str = f'<a href="file:///{r["vcd"].as_posix()}">{r["module"]}.vcd</a>' if r['vcd'].exists() else "N/A"
-        diag_str = f'<a href="file:///{r["report"].as_posix()}">Report</a>' if r['report'].exists() else "N/A"
+        diag_str = f'<a href="file:///{r["report"].as_posix()}">Report</a>' if r['report'].exists() else "None (Clean)"
         html_content += f'<tr><td><strong>{r["module"]}</strong></td><td>{badge}</td><td>{r["errors"]}</td><td>{vcd_str}</td><td>{diag_str}</td></tr>\n'
 
     html_content += """    </tbody>
@@ -406,22 +474,33 @@ def generate_dashboard(results: list):
     print(f"  Markdown: {md_file}")
     print(f"  HTML:     {html_file}")
 
-def run_regression(model_name: str, auto_heal: bool):
+def run_regression(no_ai: bool, regen_tb: bool, model_name: str, auto_heal: bool, apply_candidate: bool) -> bool:
     """Run full verification regression suite across all DUTs in dut/."""
-    dut_files = sorted(list(DUT_DIR.glob("*.v")))
+    # Only verify primary DUT modules (exclude candidate or backup files)
+    dut_files = sorted([f for f in DUT_DIR.glob("*.v") if not f.name.endswith(("_candidate.v", "_bak.v"))])
     if not dut_files:
-        print(f"[ERROR] No Verilog files found in {DUT_DIR}")
-        return
+        print(f"[ERROR] No Verilog DUT files found in {DUT_DIR}")
+        return False
 
     print("\n" + "=" * 65)
     print(f" STARTING REGRESSION SUITE ({len(dut_files)} Modules Found) ")
     print("=" * 65)
 
     results = []
+    all_passed = True
     for dut in dut_files:
         module_name = dut.stem
-        passed = run_pipeline(dut, model_name=model_name, auto_heal=auto_heal)
-        
+        passed = run_pipeline(
+            dut,
+            no_ai=no_ai,
+            regen_tb=regen_tb,
+            model_name=model_name,
+            auto_heal=auto_heal,
+            apply_candidate=apply_candidate
+        )
+        if not passed:
+            all_passed = False
+
         sim_log = LOGS_DIR / f"{module_name}_sim.log"
         error_count = 0
         if sim_log.exists():
@@ -442,30 +521,44 @@ def run_regression(model_name: str, auto_heal: bool):
         })
 
     generate_dashboard(results)
+    return all_passed
 
 def main():
     parser = argparse.ArgumentParser(description="AutoVerify-VLSI: Autonomous RTL Verification & Self-Healing Agent")
-    parser.add_argument("--dut", type=str, default="dut/alu.v", help="Path to DUT Verilog file (default: dut/alu.v)")
+    parser.add_argument("--dut", type=str, default=None, help="Path to DUT Verilog file (e.g. dut/alu.v)")
     parser.add_argument("--regression", action="store_true", help="Run full regression on all modules in dut/")
-    parser.add_argument("--auto-heal", action="store_true", help="Automatically patch RTL with Gemini's fix and re-verify")
-    parser.add_argument("--model", type=str, default="gemini-3.5-flash-lite", help="Gemini model name")
+    parser.add_argument("--no-ai", action="store_true", help="Run deterministic offline verification without Gemini API calls")
+    parser.add_argument("--regen-tb", action="store_true", help="Force AI to regenerate testbench even if one exists")
+    parser.add_argument("--auto-heal", action="store_true", help="Diagnose failures and generate candidate fix file")
+    parser.add_argument("--apply-candidate", action="store_true", help="Apply candidate fix directly to RTL after review")
+    parser.add_argument("--model", type=str, default="gemini-2.5-flash", help="Gemini model name")
     args = parser.parse_args()
 
-    api_key = get_api_key()
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        print("[ERROR] 'google-generativeai' not installed.")
-        sys.exit(1)
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(args.model)
+    # Configure Gemini API only if AI mode is needed
+    if not args.no_ai:
+        api_key = get_api_key(required=False)
+        if api_key:
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=api_key)
+            except ImportError:
+                print("[WARNING] 'google-generativeai' package not installed. Running in '--no-ai' mode.")
+                args.no_ai = True
+        else:
+            args.no_ai = True
 
     if args.regression:
-        run_regression(args.model, auto_heal=args.auto_heal)
-        return
+        success = run_regression(
+            no_ai=args.no_ai,
+            regen_tb=args.regen_tb,
+            model_name=args.model,
+            auto_heal=args.auto_heal,
+            apply_candidate=args.apply_candidate
+        )
+        sys.exit(0 if success else 1)
 
-    dut_path = Path(args.dut)
+    dut_target = args.dut or "dut/alu.v"
+    dut_path = Path(dut_target)
     if not dut_path.is_absolute():
         dut_path = ROOT_DIR / dut_path
 
@@ -473,7 +566,15 @@ def main():
         print(f"[ERROR] DUT file not found: {dut_path}")
         sys.exit(1)
 
-    run_pipeline(dut_path, model_name=args.model, auto_heal=args.auto_heal)
+    success = run_pipeline(
+        dut_path,
+        no_ai=args.no_ai,
+        regen_tb=args.regen_tb,
+        model_name=args.model,
+        auto_heal=args.auto_heal,
+        apply_candidate=args.apply_candidate
+    )
+    sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
     main()

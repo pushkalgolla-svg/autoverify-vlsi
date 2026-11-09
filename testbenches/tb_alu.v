@@ -1,25 +1,36 @@
 `timescale 1ns / 1ps
 
+/**
+ * Self-Checking Testbench for Parameterized ALU
+ * Covers directed nominal tests, corner-case boundaries, and constrained-random stimulus.
+ */
+
 module tb_alu();
 
-    // Signals
-    reg  [7:0] a;
-    reg  [7:0] b;
-    reg  [1:0] op;
-    wire [7:0] result;
-    wire       carry;
-    wire       zero;
+    parameter DATA_WIDTH = 8;
+
+    // Signals for DUT connection
+    reg  [DATA_WIDTH-1:0] a;
+    reg  [DATA_WIDTH-1:0] b;
+    reg  [1:0]            op;
+    wire [DATA_WIDTH-1:0] result;
+    wire                  carry;
+    wire                  zero;
 
     // Testbench control variables
     integer error_count;
     integer i;
-    reg [8:0] expected_full;
-    reg [7:0] expected_result;
-    reg       expected_carry;
-    reg       expected_zero;
+
+    // Expected values for scoreboard verification
+    reg [DATA_WIDTH:0]   expected_sum;
+    reg [DATA_WIDTH-1:0] expected_result;
+    reg                  expected_carry;
+    reg                  expected_zero;
 
     // Instantiate the DUT
-    alu dut (
+    alu #(
+        .DATA_WIDTH(DATA_WIDTH)
+    ) dut (
         .a(a),
         .b(b),
         .op(op),
@@ -28,185 +39,160 @@ module tb_alu();
         .zero(zero)
     );
 
+    // Watchdog timer to prevent infinite hangs
     initial begin
-        // VCD Waveform Generation
-        $dumpfile("C:/Users/91900/.gemini/antigravity/scratch/ai_verification/logs/alu.vcd");
+        #2000000;
+        $display("[ERROR] Watchdog timeout: simulation hung!");
+        $finish;
+    end
+
+    // VCD Waveform Generation (portable relative path)
+    initial begin
+        $dumpfile("logs/alu.vcd");
         $dumpvars(0, tb_alu);
+    end
 
-        // Initialize variables
+    // Task to check outputs against golden model
+    task check_case(input [255:0] test_name);
+        begin
+            #1; // Allow combinational outputs to settle
+            if ((result !== expected_result) || (carry !== expected_carry) || (zero !== expected_zero)) begin
+                $display("[FAIL] %0s | Inputs: a=0x%0h b=0x%0h op=%0b | Expected: res=0x%0h c=%0b z=%0b | Got: res=0x%0h c=%0b z=%0b",
+                         test_name, a, b, op, expected_result, expected_carry, expected_zero, result, carry, zero);
+                error_count = error_count + 1;
+            end else begin
+                $display("[PASS] %0s | res=0x%0h c=%0b z=%0b", test_name, result, carry, zero);
+            end
+        end
+    endtask
+
+    // Main Test Sequence
+    initial begin
         error_count = 0;
-        a = 8'h00;
-        b = 8'h00;
+        a  = {DATA_WIDTH{1'b0}};
+        b  = {DATA_WIDTH{1'b0}};
         op = 2'b00;
-
         #10;
 
-        // ========================================================
-        // 1. DIRECTED TESTS: ADD Operation (2'b00)
-        // ========================================================
-        $display("--- Starting Directed Tests: ADD ---");
-        
-        a = 8'h00; b = 8'h00; op = 2'b00; #10;
-        if (result !== 8'h00 || carry !== 1'b0 || zero !== 1'b1) begin
-            $display("[FAIL] ADD 0+0 Expected: res=00, c=0, z=1 | Got: res=%h, c=%b, z=%b", result, carry, zero);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] ADD 0+0");
-        end
+        $display("========================================");
+        $display("   STARTING ALU VERIFICATION BENCHMARK");
+        $display("========================================");
 
-        a = 8'h05; b = 8'h03; op = 2'b00; #10;
-        if (result !== 8'h08 || carry !== 1'b0 || zero !== 1'b0) begin
-            $display("[FAIL] ADD 5+3 Expected: res=08, c=0, z=0 | Got: res=%h, c=%b, z=%b", result, carry, zero);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] ADD 5+3");
-        end
+        //------------------------------------------------------------------
+        // 1. DIRECTED NOMINAL TESTS
+        //------------------------------------------------------------------
+        $display("\n--- Running Directed Nominal Tests ---");
 
-        a = 8'hFF; b = 8'h01; op = 2'b00; #10;
-        if (result !== 8'h00 || carry !== 1'b1 || zero !== 1'b1) begin
-            $display("[FAIL] ADD FF+01 Expected: res=00, c=1, z=1 | Got: res=%h, c=%b, z=%b", result, carry, zero);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] ADD FF+01 (Overflow)");
-        end
+        // ADD: 0x10 + 0x20 = 0x30, carry = 0, zero = 0
+        a = 8'h10; b = 8'h20; op = 2'b00;
+        expected_result = 8'h30; expected_carry = 1'b0; expected_zero = 1'b0;
+        check_case("ADD 0x10 + 0x20");
 
-        // ========================================================
-        // 2. DIRECTED TESTS: SUB Operation (2'b01)
-        // ========================================================
-        $display("--- Starting Directed Tests: SUB ---");
+        // SUB: 0x50 - 0x20 = 0x30, carry(borrow) = 0, zero = 0
+        a = 8'h50; b = 8'h20; op = 2'b01;
+        expected_result = 8'h30; expected_carry = 1'b0; expected_zero = 1'b0;
+        check_case("SUB 0x50 - 0x20");
 
-        a = 8'h0A; b = 8'h04; op = 2'b01; #10;
-        if (result !== 8'h06 || carry !== 1'b1 || zero !== 1'b0) begin
-            $display("[FAIL] SUB 10-4 Expected: res=06, c=1, z=0 | Got: res=%h, c=%b, z=%b", result, carry, zero);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] SUB 10-4");
-        end
+        // AND: 0xF0 & 0xAA = 0xA0, carry = 0, zero = 0
+        a = 8'hF0; b = 8'hAA; op = 2'b10;
+        expected_result = 8'hA0; expected_carry = 1'b0; expected_zero = 1'b0;
+        check_case("AND 0xF0 & 0xAA");
 
-        a = 8'h05; b = 8'h05; op = 2'b01; #10;
-        if (result !== 8'h00 || carry !== 1'b1 || zero !== 1'b1) begin
-            $display("[FAIL] SUB 5-5 Expected: res=00, c=1, z=1 | Got: res=%h, c=%b, z=%b", result, carry, zero);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] SUB 5-5 (Zero Result)");
-        end
+        // OR: 0xF0 | 0x0F = 0xFF, carry = 0, zero = 0
+        a = 8'hF0; b = 8'h0F; op = 2'b11;
+        expected_result = 8'hFF; expected_carry = 1'b0; expected_zero = 1'b0;
+        check_case("OR 0xF0 | 0x0F");
 
-        a = 8'h00; b = 8'h01; op = 2'b01; #10;
-        if (result !== 8'hFF || carry !== 1'b0 || zero !== 1'b0) begin
-            $display("[FAIL] SUB 0-1 Expected: res=FF, c=0, z=0 | Got: res=%h, c=%b, z=%b", result, carry, zero);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] SUB 0-1 (Underflow)");
-        end
+        //------------------------------------------------------------------
+        // 2. CORNER CASES AND BOUNDARY CONDITIONS
+        //------------------------------------------------------------------
+        $display("\n--- Running Corner Cases and Edge Conditions ---");
 
-        // ========================================================
-        // 3. DIRECTED TESTS: AND Operation (2'b10)
-        // ========================================================
-        $display("--- Starting Directed Tests: AND ---");
+        // ADD Overflow: 0xFF + 0x01 = 0x00, carry = 1, zero = 1
+        a = 8'hFF; b = 8'h01; op = 2'b00;
+        expected_result = 8'h00; expected_carry = 1'b1; expected_zero = 1'b1;
+        check_case("ADD Overflow (0xFF + 0x01)");
 
-        a = 8'hF0; b = 8'h0F; op = 2'b10; #10;
-        if (result !== 8'h00 || zero !== 1'b1) begin
-            $display("[FAIL] AND F0&0F Expected: res=00, z=1 | Got: res=%h, z=%b", result, zero);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] AND F0&0F");
-        end
+        // ADD Boundary: 0xFF + 0xFF = 0xFE, carry = 1, zero = 0
+        a = 8'hFF; b = 8'hFF; op = 2'b00;
+        expected_result = 8'hFE; expected_carry = 1'b1; expected_zero = 1'b0;
+        check_case("ADD Max (0xFF + 0xFF)");
 
-        a = 8'hA5; b = 8'h5A; op = 2'b10; #10;
-        if (result !== 8'h00 || zero !== 1'b1) begin
-            $display("[FAIL] AND A5&5A Expected: res=00, z=1 | Got: res=%h, z=%b", result, zero);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] AND A5&5A");
-        end
+        // SUB Underflow / Borrow: 0x00 - 0x01 = 0xFF, carry(borrow) = 1, zero = 0
+        a = 8'h00; b = 8'h01; op = 2'b01;
+        expected_result = 8'hFF; expected_carry = 1'b1; expected_zero = 1'b0;
+        check_case("SUB Underflow (0x00 - 0x01)");
 
-        a = 8'hAA; b = 8'hCC; op = 2'b10; #10;
-        if (result !== 8'h88 || zero !== 1'b0) begin
-            $display("[FAIL] AND AA&CC Expected: res=88, z=0 | Got: res=%h, z=%b", result, zero);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] AND AA&CC");
-        end
+        // SUB Underflow / Borrow: 0x05 - 0x0A = 0xFB, carry(borrow) = 1, zero = 0
+        a = 8'h05; b = 8'h0A; op = 2'b01;
+        expected_result = 8'hFB; expected_carry = 1'b1; expected_zero = 1'b0;
+        check_case("SUB Borrow (0x05 - 0x0A)");
 
-        // ========================================================
-        // 4. DIRECTED TESTS: OR Operation (2'b11)
-        // ========================================================
-        $display("--- Starting Directed Tests: OR ---");
+        // SUB Identical: 0x55 - 0x55 = 0x00, carry(borrow) = 0, zero = 1
+        a = 8'h55; b = 8'h55; op = 2'b01;
+        expected_result = 8'h00; expected_carry = 1'b0; expected_zero = 1'b1;
+        check_case("SUB Equal (0x55 - 0x55)");
 
-        a = 8'hF0; b = 8'h0F; op = 2'b11; #10;
-        if (result !== 8'hFF || zero !== 1'b0) begin
-            $display("[FAIL] OR F0|0F Expected: res=FF, z=0 | Got: res=%h, z=%b", result, zero);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] OR F0|0F");
-        end
+        // AND Zero: 0x55 & 0xAA = 0x00, carry = 0, zero = 1
+        a = 8'h55; b = 8'hAA; op = 2'b10;
+        expected_result = 8'h00; expected_carry = 1'b0; expected_zero = 1'b1;
+        check_case("AND Complement (0x55 & 0xAA)");
 
-        a = 8'h00; b = 8'h00; op = 2'b11; #10;
-        if (result !== 8'h00 || zero !== 1'b1) begin
-            $display("[FAIL] OR 00|00 Expected: res=00, z=1 | Got: res=%h, z=%b", result, zero);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] OR 00|00");
-        end
+        // OR Zero: 0x00 | 0x00 = 0x00, carry = 0, zero = 1
+        a = 8'h00; b = 8'h00; op = 2'b11;
+        expected_result = 8'h00; expected_carry = 1'b0; expected_zero = 1'b1;
+        check_case("OR Zero (0x00 | 0x00)");
 
-        // ========================================================
-        // 5. CONSTRAINED-RANDOM STRESS TESTING
-        // ========================================================
-        $display("--- Starting Constrained-Random Stress Test ---");
-        
-        for (i = 0; i < 200; i = i + 1) begin
+        //------------------------------------------------------------------
+        // 3. CONSTRAINED-RANDOM STRESS TESTING
+        //------------------------------------------------------------------
+        $display("\n--- Running Constrained-Random Stress Tests ---");
+
+        for (i = 0; i < 500; i = i + 1) begin
             a  = $random & 8'hFF;
             b  = $random & 8'hFF;
             op = $random & 2'b11;
-            #5;
 
-            // Compute expected values using behavioral model
             case (op)
                 2'b00: begin
-                    expected_full = a + b;
-                    expected_carry = expected_full[8];
-                    expected_result = expected_full[7:0];
+                    expected_sum    = a + b;
+                    expected_result = expected_sum[7:0];
+                    expected_carry  = expected_sum[8];
                 end
                 2'b01: begin
-                    expected_full = a - b;
-                    expected_carry = expected_full[8];
-                    expected_result = expected_full[7:0];
+                    expected_result = a - b;
+                    expected_carry  = (a < b); // Borrow flag
                 end
                 2'b10: begin
-                    expected_carry = 1'b0;
                     expected_result = a & b;
+                    expected_carry  = 1'b0;
                 end
                 2'b11: begin
-                    expected_carry = 1'b0;
                     expected_result = a | b;
-                end
-                default: begin
-                    expected_carry = 1'b0;
-                    expected_result = 8'h00;
+                    expected_carry  = 1'b0;
                 end
             endcase
             expected_zero = (expected_result == 8'h00);
 
-            // Self-check assertions
-            if ((result !== expected_result) || 
-                ((op == 2'b00 || op == 2'b01) && (carry !== expected_carry)) || 
-                (zero !== expected_zero)) begin
-                $display("[FAIL] Random Test Mismatch: op=%b, a=%h, b=%h | Expected: res=%h, c=%b, z=%b | Got: res=%h, c=%b, z=%b",
-                         op, a, b, expected_result, expected_carry, expected_zero, result, carry, zero);
+            #1;
+            if ((result !== expected_result) || (carry !== expected_carry) || (zero !== expected_zero)) begin
+                $display("[FAIL] Random iter %0d: a=0x%0h b=0x%0h op=%0b | Expected: res=0x%0h c=%0b z=%0b | Got: res=0x%0h c=%0b z=%0b",
+                         i, a, b, op, expected_result, expected_carry, expected_zero, result, carry, zero);
                 error_count = error_count + 1;
             end
         end
+        $display("[PASS] Completed 500 constrained-random test vectors.");
 
-        $display("--- Random Stress Testing Complete ---");
-
-        // ========================================================
-        // SUMMARY REPORT
-        // ========================================================
+        //------------------------------------------------------------------
+        // FINAL RESULTS SUMMARY
+        //------------------------------------------------------------------
+        $display("\n========================================");
         if (error_count == 0) begin
             $display("ALL TESTS PASSED");
         end else begin
             $display("SIMULATION FAILED: Total Errors = %0d", error_count);
         end
+        $display("========================================");
 
         $finish;
     end

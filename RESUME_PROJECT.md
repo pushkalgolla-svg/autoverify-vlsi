@@ -1,6 +1,6 @@
-# AutoVerify-VLSI: Autonomous LLM-Orchestrated RTL Verification & Self-Healing Framework
+# AutoVerify-VLSI: Automated RTL Verification & Diagnostic Framework
 
-An open-source, automated EDA verification agent that pairs Google Gemini with the open-source Icarus Verilog (`iverilog`) and GTKWave toolchain to autonomously synthesize self-checking testbenches, perform closed-loop regression testing, and self-heal digital RTL IP cores.
+An automated digital EDA verification platform pairing **Icarus Verilog (`iverilog`)**, **VVP**, and **GTKWave** with optional **Google Gemini API** orchestration for digital RTL IP cores (Arithmetic Logic Unit, Parameterized Synchronous FIFO, and UART Transmitter).
 
 ---
 
@@ -8,10 +8,10 @@ An open-source, automated EDA verification agent that pairs Google Gemini with t
 
 Copy-paste ready bullet points tailored for **ASIC / FPGA / Digital Design & Verification Engineer** roles (NVIDIA, Qualcomm, AMD, Apple, Intel, Synopsys, Cadence):
 
-> * **Architected an Autonomous EDA Verification Agent** in Python integrating the Google Gemini API with Icarus Verilog (`iverilog`) and GTKWave, automating SystemVerilog/Verilog testbench synthesis, regression execution, and failure triage for digital IP cores (ALU, Parameterized Synchronous FIFO).
-> * **Designed Constrained-Random & Boundary Testbenches** enforcing self-checking assertions and VCD signal tracing, capturing complex corner-case hazards including simultaneous read/write collisions and counter wrap-around on empty FIFO states.
-> * **Engineered a Closed-Loop Self-Healing Pipeline** that parses simulation failure logs, classifies discrepancies (RTL logic bug vs. testbench reference model error), synthesizes code patches, and verifies regression closure autonomously, cutting debug cycle time by >80%.
-> * **Standardized VCD Waveform Diagnostic Automation** with GTKWave instrumentation, generating signal traces for visual timing and state transition inspection.
+> * **Architected an Automated Digital Verification Framework** in Python integrating Icarus Verilog (`iverilog`), VVP, and GTKWave with optional Google Gemini LLM orchestration, enabling automated testbench synthesis, regression tracking, and failure triage across multiple digital IP cores.
+> * **Designed Self-Checking Constrained-Random & Boundary Testbenches** with cycle-accurate reference models, validating complex corner cases including simultaneous read/write collisions on empty/full FIFO states, arithmetic borrow flag conventions, and UART framing/parity modes across 1000+ test vectors.
+> * **Engineered an Automated Failure Diagnostic Pipeline** that parses simulation logs, classifies root causes between RTL logic faults and testbench specification discrepancies, and generates unified patch candidates for review before integration.
+> * **Constructed Portable Verification & CI Automation** using GitHub Actions and Python, enforcing deterministic regression testing with zero testbench clock-edge race conditions, automated artifact cleanup, and HTML/Markdown dashboard generation.
 
 ---
 
@@ -20,19 +20,22 @@ Copy-paste ready bullet points tailored for **ASIC / FPGA / Digital Design & Ver
 When an interviewer asks: *"Tell me about a challenging or unique VLSI/hardware project you've worked on."*
 
 ### **Situation (Context)**
-> *"In modern ASIC/VLSI design, verification consumes over 70% of the project lifecycle. Writing comprehensive testbenches that cover subtle boundary conditions—such as simultaneous read/write operations when a FIFO is full or empty—requires significant manual effort and often delays time-to-tapeout."*
+> *"In modern ASIC/VLSI design, functional verification consumes over 70% of the project schedule. Writing comprehensive testbenches that cover subtle boundary conditions—such as simultaneous read/write operations when a FIFO is full or empty, or stop-bit timing compliance in UART controllers—requires rigorous manual development and continuous regression monitoring."*
 
 ### **Task (Objective)**
-> *"My goal was to build an autonomous verification framework that could take any Verilog RTL module, dynamically generate self-checking directed and constrained-random testbenches, compile and simulate them using standard EDA tools, and autonomously analyze simulation logs to diagnose and patch RTL bugs."*
+> *"My goal was to build a reliable, automated verification environment that could run self-checking directed and constrained-random tests across multiple RTL modules, detect and isolate boundary bugs, generate signal waveforms for GTKWave inspection, and integrate with CI pipelines for automated regression tracking."*
 
 ### **Action (Implementation)**
-> * *"I developed **AutoVerify-VLSI**, a Python orchestrator connecting the Google Gemini API to the Icarus Verilog toolchain."*
-> * *"I established strict prompting constraints ensuring 100% syntactically valid Verilog-2001/SystemVerilog testbenches with self-checking golden models and formatted `[PASS]`/`[FAIL]` assertion tracking."*
-> * *"I validated the framework on multiple IP cores: an 8-bit Arithmetic Logic Unit with an injected subtraction bug, and a Parameterized Synchronous FIFO with a subtle simultaneous read/write underflow condition."*
-> * *"I built an autonomous self-healing feedback loop: when `vvp` outputs failures, the agent classifies whether the fault is in the RTL or testbench, synthesizes a unified code diff, applies the patch, and re-runs the simulation until regression closure."*
+> * *"I implemented **AutoVerify-VLSI**, a Python orchestrator connecting local EDA tools (`iverilog`, `vvp`, `gtkwave`) with optional LLM diagnostic capabilities."*
+> * *"I hardened three digital IP cores and their self-checking testbenches:
+>   1. **ALU (`dut/alu.v`)**: Parameterized width, resolved borrow/underflow conventions `(a < b)` between RTL and golden models, and added a 500-vector randomized stress suite.
+>   2. **Synchronous FIFO (`dut/sync_fifo.v`)**: Handled arbitrary `DEPTH` pointer wrapping, fixed simultaneous read/write race conditions on empty and full boundaries, and integrated shadow queue reference verification.
+>   3. **UART Transmitter (`dut/uart_tx.v`)**: Corrected premature stop-bit termination, verified None/Odd/Even parity modes, eliminated clock-edge race conditions, and validated back-to-back zero-idle framing.*"*
+> * *"I eliminated clock-edge race conditions in the testbenches by driving inputs on negative clock edges and sampling outputs with explicit delta delays."*
+> * *"I established an automated regression runner (`scripts/verify.py`) with strict exit code validation, stale artifact elimination, watchdog timeouts, candidate patch isolation, and GitHub Actions CI automation."*
 
 ### **Result (Impact)**
-> * *"The platform achieved 100% automated bug detection on both designs, correctly differentiating between an RTL arithmetic mismatch and a reference model convention discrepancy, and completed verified regression loops with zero manual intervention."*
+> *"Achieved 100% pass rates across all three IP cores over 1,000+ directed and constrained-random cycles. Established an automated regression suite with full waveform generation and interactive dashboards, running deterministically in under 5 seconds."*
 
 ---
 
@@ -40,41 +43,44 @@ When an interviewer asks: *"Tell me about a challenging or unique VLSI/hardware 
 
 ```mermaid
 flowchart TD
-    A["RTL Design Under Test (DUT)<br/>dut/alu.v, dut/sync_fifo.v"] --> B["Python Orchestrator<br/>(scripts/verify.py)"]
-    B --> C["Gemini API (gemini-2.5-flash)<br/>Testbench Synthesis"]
-    C --> D["Generated Testbench<br/>(testbenches/tb_*.v)"]
-    D --> E["Icarus Verilog Compiler<br/>(iverilog -g2012)"]
+    A["RTL Design Under Test (DUT)<br/>dut/alu.v, sync_fifo.v, uart_tx.v"] --> B["Python Orchestrator<br/>(scripts/verify.py)"]
+    TB["Validated Self-Checking Testbench<br/>(testbenches/tb_*.v)"] --> E
+    B -->|Clean Stale Artifacts| C["Artifact Cleaner"]
+    C --> E["Icarus Verilog Compiler<br/>(iverilog -g2012)"]
     A --> E
-    E -->|Syntax Error| F["Compiler Error Auto-Repair Loop"]
-    F --> C
-    E -->|Success| G["Simulation Engine<br/>(vvp)"]
+    E -->|Compilation Passed| G["Simulation Engine<br/>(vvp)"]
     G --> H["Signal Waveform Dump<br/>(logs/*.vcd -> GTKWave)"]
     G --> I["Simulation Output Log<br/>(logs/*_sim.log)"]
-    I --> J{"Any [FAIL] in Log?"}
-    J -- "No (100% Pass)" --> K["🎉 Verification Regression Passed"]
-    J -- "Yes (Bug Detected)" --> L["Gemini Root-Cause Diagnostic Agent"]
-    L --> M["Diagnostic Report<br/>(logs/*_report.md)"]
-    M --> N{"--auto-heal enabled?"}
-    N -- Yes --> O["Apply Code Patch to RTL & Re-run"]
-    O --> B
-    N -- No --> P["Manual Review"]
+    I --> J{"All Assertions Passed?"}
+    J -- "Yes (0 Errors)" --> K["🎉 Regression Passed (Exit Code 0)"]
+    J -- "No (Errors Detected)" --> L["Failure Isolation & Exit Code 1"]
+    L --> M{"AI Diagnostics Enabled?"}
+    M -- "Yes" --> N["Gemini Root-Cause Diagnostic Report & Isolated Candidate Fix"]
+    M -- "No (--no-ai)" --> P["Log Output & Deterministic Triage"]
+    K --> Q["Automated Dashboard<br/>(logs/regression_dashboard.html/md)"]
+    L --> Q
 ```
 
 ---
 
 ## 💻 Live Demo Commands (To show in an interview)
 
-### 1. Run Verification & Diagnostic Loop:
+### 1. Run Complete Regression Suite (Offline / Deterministic):
+```powershell
+uv run python scripts/verify.py --regression --no-ai
+```
+
+### 2. Verify Individual IP Core:
+```powershell
+uv run python scripts/verify.py --dut dut/uart_tx.v --no-ai
+```
+
+### 3. Open Signal Waveforms in GTKWave:
+```powershell
+gtkwave logs/uart_tx.vcd
+```
+
+### 4. Run with Optional AI Root-Cause Diagnostic:
 ```powershell
 uv run python scripts/verify.py --dut dut/alu.v
-```
-
-### 2. Run Autonomous Self-Healing on Synchronous FIFO:
-```powershell
-uv run python scripts/verify.py --dut dut/sync_fifo.v --auto-heal
-```
-
-### 3. Open Waveform in GTKWave:
-```powershell
-gtkwave logs/alu.vcd
 ```

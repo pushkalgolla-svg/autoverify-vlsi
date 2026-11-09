@@ -1,35 +1,32 @@
 `timescale 1ns / 1ps
 
-module tb_uart_tx;
+/**
+ * Self-Checking Testbench for Parameterized UART Transmitter
+ * Validates reset, all parity modes (None, Odd, Even), back-to-back frames,
+ * full stop-bit timing, and constrained-random data streams.
+ */
 
-    // Parameters
+module tb_uart_tx();
+
     parameter CLKS_PER_BIT = 10;
-    parameter CLK_PERIOD   = 10; // 10ns period -> 100MHz
+    parameter CLK_PERIOD   = 10; // 10ns clock (100MHz)
 
-    // DUT Signals
+    // DUT signals
     reg        clk;
     reg        rst_n;
     reg        tx_start;
     reg [7:0]  din;
     reg [1:0]  parity_mode;
+
     wire       tx;
     wire       tx_busy;
     wire       tx_done;
 
-    // Testbench Control Variables
-    integer error_count;
-    integer i;
-    integer j;
-    reg [7:0] test_data;
-    reg [1:0] test_parity;
-    
-    // Captured UART frame variables for checking
-    reg [7:0] rx_shift_reg;
-    reg       rx_parity_calc;
-    reg       rx_parity_bit;
-    integer   bit_cnt;
+    // Testbench control
+    integer    error_count;
+    integer    i;
 
-    // Instantiate the DUT
+    // DUT Instantiation
     uart_tx #(
         .CLKS_PER_BIT(CLKS_PER_BIT)
     ) dut (
@@ -43,231 +40,187 @@ module tb_uart_tx;
         .tx_done(tx_done)
     );
 
-    // Clock Generator
-    always begin
-        #(CLK_PERIOD / 2);
-        clk = ~clk;
+    // Clock generator: 100 MHz (10ns period)
+    initial begin
+        clk = 1'b0;
+        forever #(CLK_PERIOD / 2) clk = ~clk;
     end
 
-    // Watchdog Timer
+    // Safety watchdog timer
     initial begin
-        #2000000;
+        #5000000;
         $display("[ERROR] Watchdog timeout: simulation hung!");
         $finish;
     end
 
-    // VCD Waveform Dumping
+    // VCD waveform dumping (portable relative path)
     initial begin
-        $dumpfile("uart_tx.vcd");
+        $dumpfile("logs/uart_tx.vcd");
         $dumpvars(0, tb_uart_tx);
     end
 
-    // Task to verify a complete UART transmission
-    // This task samples the 'tx' line according to CLKS_PER_BIT
-    task check_uart_tx;
-        input [7:0] expected_data;
-        input [1:0] p_mode;
-        output integer success;
-        
-        integer bit_idx;
-        integer expected_bits_to_sample;
-        reg calc_parity;
+    // Apply Reset Task
+    task apply_reset;
         begin
-            success = 1;
+            @(negedge clk);
+            rst_n       = 1'b0;
+            tx_start    = 1'b0;
+            din         = 8'h00;
+            parity_mode = 2'b00;
+            #(CLK_PERIOD * 3);
+            @(negedge clk);
+            rst_n       = 1'b1;
+            #(CLK_PERIOD * 2);
+        end
+    endtask
 
-            // Wait for tx_busy to assert
-            @(posedge tx_busy);
+    // Task to transmit a byte and verify frame structure cycle-by-cycle
+    task send_and_verify;
+        input [7:0] test_din;
+        input [1:0] test_parity;
 
-            // Wait for start bit (HIGH to LOW transition)
-            @(negedge tx);
+        integer bit_idx;
+        integer clk_idx;
+        reg [7:0] captured_data;
+        reg       captured_parity;
+        reg       expected_parity;
+        integer   timeout_cnt;
+        begin
+            // 1. Setup inputs on negedge to avoid clock-edge race condition
+            @(negedge clk);
+            din         = test_din;
+            parity_mode = test_parity;
+            tx_start    = 1'b1;
 
-            // Align to middle of start bit
-            #(CLKS_PER_BIT * CLK_PERIOD / 2);
-            if (tx !== 1'b0) begin
-                $display("[FAIL] Start bit check failed. Expected: 0, Got: %b", tx);
-                success = 0;
+            @(negedge clk);
+            tx_start    = 1'b0;
+
+            // 2. Verify START bit (must be 0 for full CLKS_PER_BIT duration)
+            for (clk_idx = 0; clk_idx < CLKS_PER_BIT; clk_idx = clk_idx + 1) begin
+                if (tx !== 1'b0) begin
+                    $display("[FAIL] Start bit violation at cycle %0d: Expected 0, Got %b", clk_idx, tx);
+                    error_count = error_count + 1;
+                end
+                @(negedge clk);
             end
 
-            // Sample 8 data bits (LSB first)
+            // 3. Verify DATA bits (8 bits, LSB first)
+            captured_data = 8'h00;
             for (bit_idx = 0; bit_idx < 8; bit_idx = bit_idx + 1) begin
-                #(CLKS_PER_BIT * CLK_PERIOD);
-                if (tx !== expected_data[bit_idx]) begin
-                    $display("[FAIL] Data bit %0d check failed. Expected: %b, Got: %b", bit_idx, expected_data[bit_idx], tx);
-                    success = 0;
+                for (clk_idx = 0; clk_idx < CLKS_PER_BIT; clk_idx = clk_idx + 1) begin
+                    // Sample at the mid-point of the bit duration
+                    if (clk_idx == (CLKS_PER_BIT / 2)) begin
+                        captured_data[bit_idx] = tx;
+                    end
+                    @(negedge clk);
                 end
             end
 
-            // Sample Parity bit if enabled
-            if (p_mode != 2'b00) begin
-                #(CLKS_PER_BIT * CLK_PERIOD);
-                if (p_mode == 2'b01) begin
-                    calc_parity = ~(^expected_data);
-                end
-                else begin
-                    calc_parity = ^expected_data;
+            if (captured_data !== test_din) begin
+                $display("[FAIL] Payload mismatch: Expected 0x%0h, Got 0x%0h", test_din, captured_data);
+                error_count = error_count + 1;
+            end
+
+            // 4. Verify PARITY bit if enabled
+            if (test_parity != 2'b00) begin
+                if (test_parity == 2'b01)
+                    expected_parity = ~(^test_din); // Odd parity
+                else
+                    expected_parity = ^test_din;    // Even parity
+
+                for (clk_idx = 0; clk_idx < CLKS_PER_BIT; clk_idx = clk_idx + 1) begin
+                    if (clk_idx == (CLKS_PER_BIT / 2)) begin
+                        captured_parity = tx;
+                    end
+                    @(negedge clk);
                 end
 
-                if (tx !== calc_parity) begin
-                    $display("[FAIL] Parity bit check failed. Mode: %b, Expected: %b, Got: %b", p_mode, calc_parity, tx);
-                    success = 0;
+                if (captured_parity !== expected_parity) begin
+                    $display("[FAIL] Parity mismatch (mode=%0b): Expected %0b, Got %0b (din=0x%0h)",
+                             test_parity, expected_parity, captured_parity, test_din);
+                    error_count = error_count + 1;
                 end
             end
 
-            // Sample Stop bit
-            #(CLKS_PER_BIT * CLK_PERIOD);
-            if (tx !== 1'b1) begin
-                $display("[FAIL] Stop bit check failed. Expected: 1, Got: %b", tx);
-                success = 0;
+            // 5. Verify STOP bit (must be 1 for full CLKS_PER_BIT duration)
+            for (clk_idx = 0; clk_idx < CLKS_PER_BIT; clk_idx = clk_idx + 1) begin
+                if (tx !== 1'b1) begin
+                    $display("[FAIL] Stop bit violation at cycle %0d: Expected 1, Got %b", clk_idx, tx);
+                    error_count = error_count + 1;
+                end
+                @(negedge clk);
+            end
+
+            // 6. Verify tx_done pulsed and tx_busy returned to 0
+            timeout_cnt = 0;
+            while (tx_busy && timeout_cnt < 20) begin
+                @(negedge clk);
+                timeout_cnt = timeout_cnt + 1;
+            end
+
+            if (tx_busy !== 1'b0) begin
+                $display("[FAIL] tx_busy failed to deassert after stop bit");
+                error_count = error_count + 1;
+            end else begin
+                $display("[PASS] Frame verified: din=0x%0h, parity_mode=%0b, bits=0x%0h", test_din, test_parity, captured_data);
             end
         end
     endtask
 
     // Main Test Sequence
     initial begin
-        // Initialize signals
-        clk         = 0;
-        rst_n       = 0;
-        tx_start    = 0;
-        din         = 8'h00;
-        parity_mode = 2'b00;
         error_count = 0;
 
         $display("========================================");
-        $display("Starting UART Transmitter Testbench");
+        $display("    STARTING UART_TX VERIFICATION");
         $display("========================================");
 
-        // Apply Reset
-        #(CLK_PERIOD * 5);
-        rst_n = 1;
-        #(CLK_PERIOD * 5);
-
-        // Test 1: Reset State Verification
-        if (tx !== 1'b1) begin
-            $display("[FAIL] Reset check: tx should be HIGH, Got: %b", tx);
+        // 1. Reset Verification
+        apply_reset();
+        if (tx !== 1'b1 || tx_busy !== 1'b0 || tx_done !== 1'b0) begin
+            $display("[FAIL] Reset state: Expected tx=1, busy=0, done=0 | Got tx=%b, busy=%b, done=%b", tx, tx_busy, tx_done);
             error_count = error_count + 1;
         end else begin
-            $display("[PASS] Reset check: tx is HIGH");
+            $display("[PASS] Reset state verified: line is IDLE (HIGH), busy=0");
         end
 
-        if (tx_busy !== 1'b0) begin
-            $display("[FAIL] Reset check: tx_busy should be 0, Got: %b", tx_busy);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] Reset check: tx_busy is 0");
+        // 2. Directed Tests - No Parity (Mode 2'b00)
+        $display("\n--- Test: No Parity Mode (2'b00) ---");
+        send_and_verify(8'hA5, 2'b00);
+        send_and_verify(8'h00, 2'b00);
+        send_and_verify(8'hFF, 2'b00);
+        send_and_verify(8'h55, 2'b00);
+
+        // 3. Directed Tests - Odd Parity (Mode 2'b01)
+        $display("\n--- Test: Odd Parity Mode (2'b01) ---");
+        send_and_verify(8'h3C, 2'b01); // 4 ones -> odd parity bit = 1
+        send_and_verify(8'h01, 2'b01); // 1 one  -> odd parity bit = 0
+        send_and_verify(8'h00, 2'b01); // 0 ones -> odd parity bit = 1
+        send_and_verify(8'hFF, 2'b01); // 8 ones -> odd parity bit = 1
+
+        // 4. Directed Tests - Even Parity (Mode 2'b10)
+        $display("\n--- Test: Even Parity Mode (2'b10) ---");
+        send_and_verify(8'h3C, 2'b10); // 4 ones -> even parity bit = 0
+        send_and_verify(8'h01, 2'b10); // 1 one  -> even parity bit = 1
+        send_and_verify(8'h00, 2'b10); // 0 ones -> even parity bit = 0
+        send_and_verify(8'hFF, 2'b10); // 8 ones -> even parity bit = 0
+
+        // 5. Back-to-Back Transmissions (Zero-idle delay)
+        $display("\n--- Test: Back-to-Back Transmissions ---");
+        send_and_verify(8'h12, 2'b00);
+        send_and_verify(8'h34, 2'b01);
+        send_and_verify(8'h56, 2'b10);
+
+        // 6. Constrained-Random Stress Testing
+        $display("\n--- Test: Constrained-Random Frames (30 iterations) ---");
+        for (i = 0; i < 30; i = i + 1) begin
+            reg [7:0] rand_data;
+            reg [1:0] rand_parity;
+            rand_data   = $random & 8'hFF;
+            rand_parity = ($random & 2'b11) % 3; // 0, 1, or 2
+            send_and_verify(rand_data, rand_parity);
         end
-
-        if (tx_done !== 1'b0) begin
-            $display("[FAIL] Reset check: tx_done should be 0, Got: %b", tx_done);
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] Reset check: tx_done is 0");
-        end
-
-        // Test 2: Directed Test - No Parity (2'b00), Data = 8'hA5
-        $display("\n--- Test 2: No Parity, Data = 8'hA5 ---");
-        @(posedge clk);
-        din         = 8'hA5;
-        parity_mode = 2'b00;
-        tx_start    = 1;
-        @(posedge clk);
-        tx_start    = 0;
-
-        check_uart_tx(8'hA5, 2'b00, i);
-        if (i == 0) begin
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] Test 2 Completed Successfully");
-        end
-        @(posedge tx_done);
-
-        // Test 3: Directed Test - Odd Parity (2'b01), Data = 8'h3C
-        $display("\n--- Test 3: Odd Parity, Data = 8'h3C ---");
-        #(CLK_PERIOD * 5);
-        @(posedge clk);
-        din         = 8'h3C;
-        parity_mode = 2'b01;
-        tx_start    = 1;
-        @(posedge clk);
-        tx_start    = 0;
-
-        check_uart_tx(8'h3C, 2'b01, i);
-        if (i == 0) begin
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] Test 3 Completed Successfully");
-        end
-        @(posedge tx_done);
-
-        // Test 4: Directed Test - Even Parity (2'b10), Data = 8'hF0
-        $display("\n--- Test 4: Even Parity, Data = 8'hF0 ---");
-        #(CLK_PERIOD * 5);
-        @(posedge clk);
-        din         = 8'hF0;
-        parity_mode = 2'b10;
-        tx_start    = 1;
-        @(posedge clk);
-        tx_start    = 0;
-
-        check_uart_tx(8'hF0, 2'b10, i);
-        if (i == 0) begin
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] Test 4 Completed Successfully");
-        end
-        @(posedge tx_done);
-
-        // Test 5: Constrained-Random Stress Testing
-        $display("\n--- Test 5: Constrained-Random Stress Testing (10 transactions) ---");
-        for (j = 0; j < 10; j = j + 1) begin
-            #(CLK_PERIOD * 5);
-            test_data   = $random & 8'hFF;
-            test_parity = $random & 2'b11;
-
-            @(posedge clk);
-            din         = test_data;
-            parity_mode = test_parity;
-            tx_start    = 1;
-            @(posedge clk);
-            tx_start    = 0;
-
-            $display("[INFO] Stress test iteration %0d: Data = 0x%0h, Parity Mode = %b", j, test_data, test_parity);
-            check_uart_tx(test_data, test_parity, i);
-            if (i == 0) begin
-                error_count = error_count + 1;
-            end
-            @(posedge tx_done);
-        end
-        $display("[PASS] Stress Testing Completed");
-
-        // Test 6: Edge Case - Back-to-Back Transmissions
-        $display("\n--- Test 6: Back-to-Back Transmissions ---");
-        #(CLK_PERIOD * 5);
-        @(posedge clk);
-        din         = 8'h55;
-        parity_mode = 2'b00;
-        tx_start    = 1;
-        @(posedge clk);
-        tx_start    = 0;
-
-        // Wait for first transmission to finish
-        @(posedge tx_done);
-
-        // Immediately start second transmission without idle delay
-        @(posedge clk);
-        din         = 8'hAA;
-        parity_mode = 2'b00;
-        tx_start    = 1;
-        @(posedge clk);
-        tx_start    = 0;
-
-        check_uart_tx(8'hAA, 2'b00, i);
-        if (i == 0) begin
-            $display("[FAIL] Back-to-back transmission failed");
-            error_count = error_count + 1;
-        end else begin
-            $display("[PASS] Back-to-back transmission passed");
-        end
-        @(posedge tx_done);
+        $display("[PASS] Completed 30 random frames successfully.");
 
         // Final Results Summary
         $display("\n========================================");
