@@ -28,14 +28,14 @@ When an interviewer asks: *"Tell me about a challenging or unique VLSI/hardware 
 ### **Action (Implementation)**
 > * *"I implemented **AutoVerify-VLSI**, a Python orchestrator connecting local EDA tools (`iverilog`, `vvp`, `gtkwave`) with optional LLM diagnostic capabilities."*
 > * *"I hardened three digital IP cores and their self-checking testbenches:
->   1. **ALU (`dut/alu.v`)**: Parameterized width, resolved borrow/underflow conventions `(a < b)` between RTL and golden models, and added a 500-vector randomized stress suite.
->   2. **Synchronous FIFO (`dut/sync_fifo.v`)**: Handled arbitrary `DEPTH` pointer wrapping, fixed simultaneous read/write race conditions on empty and full boundaries, and integrated shadow queue reference verification.
->   3. **UART Transmitter (`dut/uart_tx.v`)**: Corrected premature stop-bit termination, verified None/Odd/Even parity modes, eliminated clock-edge race conditions, and validated back-to-back zero-idle framing.*"*
-> * *"I eliminated clock-edge race conditions in the testbenches by driving inputs on negative clock edges and sampling outputs with explicit delta delays."*
-> * *"I established an automated regression runner (`scripts/verify.py`) with strict exit code validation, stale artifact elimination, watchdog timeouts, candidate patch isolation, and GitHub Actions CI automation."*
+>   1. **ALU (`dut/alu.v`)**: Verified across 8, 16, and 32-bit parameterized configurations with width-independent randomized stimulus and reference calculations, resolved subtraction borrow/underflow conventions `(a < b)` between RTL and golden models, and added a 600-vector randomized stress suite.
+>   2. **Synchronous FIFO (`dut/sync_fifo.v`)**: Handled arbitrary `DEPTH` pointer wrapping (including DEPTH=1, DEPTH=5, and DEPTH=16), fixed simultaneous read/write race conditions on empty and full boundaries, and integrated shadow queue reference verification.
+>   3. **UART Transmitter (`dut/uart_tx.v`)**: Corrected premature stop-bit termination, latched parity configuration on transmission start, defined unsupported parity modes (`2'b11`), eliminated clock-edge race conditions, and measured actual consecutive-frame timing (verified minimal 1-clock-cycle inter-frame gap across multiple intentional delays).*\"*
+> * *\"I eliminated clock-edge race conditions in the testbenches by driving inputs on negative clock edges and sampling outputs with explicit delta delays after positive edges.\"*
+> * *\"I established an automated regression runner (`scripts/verify.py`) with strict exit code validation, stale artifact elimination, watchdog timeouts, candidate patch isolation, and GitHub Actions CI automation.\"*
 
 ### **Result (Impact)**
-> *"Achieved 100% pass rates across all three IP cores over 1,000+ directed and constrained-random cycles. Established an automated regression suite with full waveform generation and interactive dashboards, running deterministically in under 5 seconds."*
+> *\"Achieved 100% pass rates across all three IP cores over 1,000+ directed and constrained-random cycles. Established an automated regression suite with full waveform generation and comprehensive HTML/Markdown summary reports, running deterministically in under 5 seconds.\"*
 
 ---
 

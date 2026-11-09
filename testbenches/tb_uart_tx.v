@@ -8,7 +8,7 @@
  *   3. tx_done pulsing for EXACTLY ONE clock cycle and returning LOW on the immediately following cycle.
  *   4. Latched parity mode: external parity_mode change during active frame has no effect.
  *   5. Unsupported parity_mode (2'b11): safely treated as No Parity.
- *   6. Measured inter-frame clock gap on consecutive transmissions (measures actual 1-cycle gap).
+ *   6. Measured inter-frame clock gap on consecutive transmissions across multiple intentional delays.
  *   7. Directed nominal tests (None, Odd, Even parity).
  *   8. 30 constrained-random stress test frames.
  */
@@ -56,7 +56,7 @@ module tb_uart_tx();
 
     // Safety watchdog timer
     initial begin
-        #15000000;
+        #25000000;
         $display("[ERROR] Watchdog timeout: simulation hung!");
         $finish;
     end
@@ -232,7 +232,10 @@ module tb_uart_tx();
             tx_start = 1'b0;
 
             // Wait until tx_done asserts
-            while (tx_done !== 1'b1) @(posedge clk);
+            while (tx_done !== 1'b1) begin
+                @(posedge clk);
+                #1;
+            end
 
             // Verified tx_done is HIGH here
             if (tx_done !== 1'b1) begin
@@ -257,13 +260,19 @@ module tb_uart_tx();
     endtask
 
     // Task to measure actual inter-frame gap between consecutive transmissions
+    // Accurately samples DUT signals on positive clock edges with #1 delay after NBA updates
     task measure_consecutive_frame_gap;
         input [7:0] byte1;
         input [7:0] byte2;
-        integer gap_clocks;
+        input integer intentional_delay; // number of additional clock cycles to delay before asserting tx_start
+
+        integer wait_idx;
+        integer measured_gap;
+        integer expected_gap;
         begin
-            $display("\n--- [Test 5] Measuring Actual Inter-Frame Gap on Consecutive Transmissions ---");
-            // Frame 1
+            $display("\n--- [Test 5] Measuring Inter-Frame Gap (Intentional Delay = %0d cycles) ---", intentional_delay);
+
+            // Step 1: Transmit Frame 1
             @(negedge clk);
             din = byte1;
             parity_mode = 2'b00;
@@ -271,43 +280,65 @@ module tb_uart_tx();
             @(negedge clk);
             tx_start = 1'b0;
 
-            // Wait until Frame 1 completes (tx_busy becomes 0)
-            while (tx_busy !== 1'b0) @(posedge clk);
+            // Step 2: Wait until Frame 1 completion (tx_done asserts at posedge)
+            while (tx_done !== 1'b1) begin
+                @(posedge clk);
+                #1;
+            end
+            // At this point (posedge + #1), Frame 1 has completed and tx_done == 1.
 
-            // Frame 1 stop bit has completed at this posedge.
-            // On the immediate next negedge, initiate Frame 2:
+            // Step 3: Measure clock cycles from Frame 1 completion to Frame 2 start bit
+            measured_gap = 0;
+
+            // Any intentional idle delay cycles
+            for (wait_idx = 0; wait_idx < intentional_delay; wait_idx = wait_idx + 1) begin
+                @(posedge clk);
+                #1;
+                measured_gap = measured_gap + 1;
+            end
+
+            // Drive tx_start for Frame 2 on negedge
             @(negedge clk);
             din = byte2;
             parity_mode = 2'b00;
             tx_start = 1'b1;
 
+            // On the subsequent posedge + #1, DUT evaluates tx_start from STATE_IDLE
+            @(posedge clk);
+            #1;
+            measured_gap = measured_gap + 1;
+
+            // Deassert tx_start on negedge
             @(negedge clk);
             tx_start = 1'b0;
 
-            // Sample at posedge + #1
-            gap_clocks = 0;
-            @(posedge clk);
-            #1;
-            // The DUT in STATE_IDLE sampled tx_start and transitioned to STATE_START, setting tx <= 0!
-            // Count any additional cycles if tx was still 1
-            while (tx === 1'b1 && gap_clocks < 10) begin
-                gap_clocks = gap_clocks + 1;
+            // Step 4: Sample DUT at every positive clock edge with #1 delay (after NBA updates)
+            // If tx hasn't dropped yet, count remaining clock cycles
+            while ((tx !== 1'b0 || tx_busy !== 1'b1) && measured_gap < 50) begin
+                @(posedge clk);
+                #1;
+                measured_gap = measured_gap + 1;
+            end
+
+            // Expected gap: 1 cycle minimum for STATE_IDLE acceptance + intentional_delay
+            expected_gap = 1 + intentional_delay;
+
+            $display("[INFO] Measured cycles from Frame 1 completion to Frame 2 start: %0d (Expected: %0d)",
+                     measured_gap, expected_gap);
+
+            if (measured_gap !== expected_gap) begin
+                $display("[FAIL] Inter-frame gap mismatch: Expected %0d cycles, measured %0d cycles",
+                         expected_gap, measured_gap);
+                total_errors = total_errors + 1;
+            end else begin
+                $display("[PASS] Inter-frame gap correctly measured: %0d clock cycle(s).", measured_gap);
+            end
+
+            // Wait for Frame 2 to complete cleanly
+            while (tx_done !== 1'b1) begin
                 @(posedge clk);
                 #1;
             end
-            // Adding the 1 clock cycle of idle line between Frame 1 completion posedge and Frame 2 start posedge
-            gap_clocks = gap_clocks + 1;
-
-            $display("[INFO] Measured actual inter-frame gap: %0d clock cycle(s).", gap_clocks);
-            if (gap_clocks !== 1) begin
-                $display("[FAIL] Inter-frame gap mismatch: Expected exactly 1 clock cycle, got %0d", gap_clocks);
-                total_errors = total_errors + 1;
-            end else begin
-                $display("[PASS] Back-to-back transmission verified with measured %0d clock cycle gap.", gap_clocks);
-            end
-
-            // Wait for Frame 2 to finish
-            while (tx_busy !== 1'b0) @(posedge clk);
             @(negedge clk);
         end
     endtask
@@ -349,8 +380,15 @@ module tb_uart_tx();
         // 3. Verify tx_done deasserts immediately on next clock
         verify_tx_done_immediate_low();
 
-        // 4. Measure Actual Consecutive Frame Gap
-        measure_consecutive_frame_gap(8'h12, 8'h34);
+        // 4. Measure Actual Consecutive Frame Gap Across Multiple Intentional Delays
+        // Test A: Immediate next-cycle transmission (intentional delay = 0) -> measured 1 cycle
+        measure_consecutive_frame_gap(8'h12, 8'h34, 0);
+
+        // Test B: Transmission with 3 cycles of intentional idle delay -> measured 1 + 3 = 4 cycles
+        measure_consecutive_frame_gap(8'h56, 8'h78, 3);
+
+        // Test C: Transmission with 7 cycles of intentional idle delay -> measured 1 + 7 = 8 cycles
+        measure_consecutive_frame_gap(8'h9A, 8'hBC, 7);
 
         // 5. Parity Mode Latching Check (Change external input during active frame)
         $display("\n--- [Test 6] Parity Latching Verification (Change external input during frame) ---");
