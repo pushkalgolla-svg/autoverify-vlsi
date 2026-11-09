@@ -30,7 +30,7 @@ LOGS_DIR = ROOT_DIR / "logs"
 ENV_FILE = ROOT_DIR / ".env"
 
 def load_env():
-    """Load GEMINI_API_KEY from .env if present."""
+    """Load GEMINI_API_KEY from .env if present (standard library parser)."""
     if ENV_FILE.exists():
         with open(ENV_FILE, "r", encoding="utf-8") as f:
             for line in f:
@@ -92,7 +92,11 @@ def clean_code_block(text: str) -> str:
 
 def generate_with_fallback(prompt: str, preferred_model: str = "gemini-2.5-flash"):
     """Call Gemini API with automatic fallback across models on quota limits."""
-    import google.generativeai as genai
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        raise ImportError("Package 'google-generativeai' is required for AI features. Install with: pip install google-generativeai")
+
     model_candidates = [preferred_model, "gemini-2.5-flash", "gemini-2.5-flash-lite"]
     unique_models = []
     for m in model_candidates:
@@ -130,8 +134,8 @@ def remove_stale_artifacts(module_name: str):
         LOGS_DIR / f"{module_name}_sim.vvp",
         LOGS_DIR / f"{module_name}_sim.log",
         LOGS_DIR / f"{module_name}.vcd",
-        LOGS_DIR / f"{module_name}_report.md",
-        LOGS_DIR / f"{module_name}_patch.diff"
+        LOGS_DIR / f"{module_name}_candidate_sim.vvp",
+        LOGS_DIR / f"{module_name}_candidate_sim.log",
     ]
     for f in stale_files:
         if f.exists():
@@ -139,6 +143,56 @@ def remove_stale_artifacts(module_name: str):
                 f.unlink()
             except OSError:
                 pass
+
+def test_candidate_in_isolation(candidate_path: Path, tb_path: Path, module_name: str, iverilog_bin: str, vvp_bin: str) -> tuple[bool, str]:
+    """Compile and simulate candidate RTL in sandbox isolation before replacing original."""
+    cand_bin = LOGS_DIR / f"{module_name}_candidate_sim.vvp"
+    cand_log = LOGS_DIR / f"{module_name}_candidate_sim.log"
+
+    if cand_bin.exists():
+        try:
+            cand_bin.unlink()
+        except OSError:
+            pass
+
+    # 1. Compile candidate in sandbox
+    compile_cmd = [iverilog_bin, "-g2012", "-o", str(cand_bin), str(candidate_path), str(tb_path)]
+    try:
+        comp_res = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        return False, "Candidate compilation timed out after 20 seconds."
+
+    if comp_res.returncode != 0 or not cand_bin.exists():
+        return False, f"Candidate compilation failed:\n{comp_res.stderr or comp_res.stdout}"
+
+    # 2. Simulate candidate in sandbox
+    try:
+        sim_res = subprocess.run([vvp_bin, str(cand_bin)], capture_output=True, text=True, timeout=15)
+        sim_out = sim_res.stdout + sim_res.stderr
+        sim_code = sim_res.returncode
+    except subprocess.TimeoutExpired:
+        return False, "Candidate simulation timed out (15s): Possible infinite loop."
+    finally:
+        if cand_bin.exists():
+            try:
+                cand_bin.unlink()
+            except OSError:
+                pass
+
+    with open(cand_log, "w", encoding="utf-8") as f:
+        f.write(sim_out)
+
+    has_fail = (
+        sim_code != 0 or
+        "[FAIL]" in sim_out or
+        "[ERROR]" in sim_out or
+        "SIMULATION FAILED" in sim_out or
+        "ALL TESTS PASSED" not in sim_out
+    )
+    if has_fail:
+        return False, f"Candidate failed verification checks (exit code {sim_code})."
+
+    return True, "Candidate RTL passed all compilation and self-checking simulation checks (0 errors)."
 
 def synthesize_testbench_ai(dut_path: Path, tb_path: Path, model_name: str) -> bool:
     """Synthesize testbench using Gemini API with strict Verilog-2001 constraints."""
@@ -179,7 +233,7 @@ Requirements for the testbench:
    - Self-check expected results against DUT outputs.
    - Print `[PASS] <description>` when matching.
    - Print `[FAIL] <description> Expected: ... Got: ...` on mismatch and increment `error_count`.
-6. Enable VCD waveform dumping:
+6. Enable VCD waveform dumping using portable relative path:
    `$dumpfile("logs/{module_name}.vcd"); $dumpvars(0, tb_{module_name});`
 7. At completion:
    - If `error_count == 0`, display `ALL TESTS PASSED`.
@@ -300,8 +354,8 @@ def run_pipeline(
     if not has_failure:
         print(f"🎉 [SUCCESS] All verification tests passed for {dut_path.name}! (0 errors)")
         if vcd_path.exists():
-            print(f"📊 Waveform dumped to: {vcd_path}")
-            print(f"   View in GTKWave: gtkwave \"{vcd_path}\"")
+            print(f"📊 Waveform dumped to: logs/{vcd_path.name}")
+            print(f"   View in GTKWave: gtkwave logs/{vcd_path.name}")
         return True
 
     print(f"\n[4/4] ⚠️ Failure detected in {dut_path.name}!")
@@ -353,9 +407,9 @@ Please provide a structured report with:
         print("=" * 65)
         print(report_text)
         print("=" * 65)
-        print(f"\nDiagnostic report saved to: {report_file}")
+        print(f"\nDiagnostic report saved to: logs/{report_file.name}")
 
-        # Save AI Candidate Fix (Never overwrite validated RTL automatically)
+        # Save AI Candidate Fix (Isolated separately)
         fixed_code = extract_corrected_code(report_text)
         if fixed_code:
             candidate_path = DUT_DIR / f"{module_name}_candidate.v"
@@ -374,25 +428,48 @@ Please provide a structured report with:
             with open(patch_path, "w", encoding="utf-8") as f:
                 f.write(diff_text)
 
-            print(f"\n[CANDIDATE FIX] Proposed RTL fix isolated at: {candidate_path}")
-            print(f"[CANDIDATE FIX] Unified diff saved at: {patch_path}")
+            print(f"\n[CANDIDATE FIX] Proposed RTL fix isolated at: {candidate_path.name}")
+            print(f"[CANDIDATE FIX] Unified diff saved at: logs/{patch_path.name}")
+
+            # Pre-validate candidate in sandbox before any replacement
+            print(f"[CANDIDATE CHECK] Pre-validating candidate RTL in sandbox isolation...")
+            cand_ok, cand_msg = test_candidate_in_isolation(candidate_path, tb_path, module_name, iverilog_bin, vvp_bin)
+            if cand_ok:
+                print(f"✅ [CANDIDATE VERIFIED] {cand_msg}")
+            else:
+                print(f"❌ [CANDIDATE REJECTED] {cand_msg}")
 
             if auto_heal and apply_candidate:
+                if not cand_ok:
+                    print("[SAFETY GUARD] Aborting auto-heal: Candidate failed isolated sandbox test. Validated RTL untouched.")
+                    return False
+
                 backup_path = dut_path.with_suffix(".v.bak")
                 shutil.copyfile(dut_path, backup_path)
-                with open(dut_path, "w", encoding="utf-8") as f:
-                    f.write(fixed_code)
-                print(f"[SELF-HEALING] Replaced {dut_path.name} with candidate (backup: {backup_path.name}). Re-verifying...")
-                return run_pipeline(dut_path, no_ai=True)
+                print(f"[SELF-HEALING] Backup created at: {backup_path.name}")
+                shutil.copyfile(candidate_path, dut_path)
+                print(f"[SELF-HEALING] Applied verified candidate to {dut_path.name}. Running full verification...")
+
+                final_ok = run_pipeline(dut_path, no_ai=True)
+                if not final_ok:
+                    print(f"⚠️ [SAFETY ROLLBACK] Verification failed after applying candidate! Restoring {dut_path.name} from backup...")
+                    shutil.copyfile(backup_path, dut_path)
+                    print(f"[SAFETY ROLLBACK] Original {dut_path.name} restored successfully.")
+                    return False
+                else:
+                    print(f"🎉 [SELF-HEALING] Candidate successfully verified and deployed.")
+                    if backup_path.exists():
+                        backup_path.unlink()
+                    return True
             elif auto_heal:
-                print("[NOTICE] Auto-heal candidate generated for review. Pass '--apply-candidate' to overwrite validated RTL.")
+                print("[NOTICE] Auto-heal candidate evaluated. Pass '--apply-candidate' to apply verified candidate to RTL.")
     except Exception as e:
         print(f"[!] AI Diagnostic generation failed: {e}")
 
     return False
 
 def generate_dashboard(results: list):
-    """Generate HTML and Markdown regression summary dashboards."""
+    """Generate HTML and Markdown regression summary dashboards using project-relative paths."""
     md_file = LOGS_DIR / "regression_dashboard.md"
     html_file = LOGS_DIR / "regression_dashboard.html"
 
@@ -401,7 +478,7 @@ def generate_dashboard(results: list):
     failed = total - passed
     pass_rate = (passed / total * 100) if total > 0 else 0
 
-    # Markdown Dashboard
+    # Markdown Dashboard (Strictly portable relative links)
     md_content = f"""# AutoVerify-VLSI: Regression Summary Dashboard
 
 **Overall Status**: {'🟢 ALL PASSED' if failed == 0 else '🔴 FAILURES DETECTED'}  
@@ -412,14 +489,14 @@ def generate_dashboard(results: list):
 """
     for r in results:
         status_badge = "✅ PASSED" if r["status"] == "PASSED" else "❌ FAILED"
-        vcd_link = f"[`{r['module']}.vcd`](file:///{r['vcd'].as_posix()})" if r['vcd'].exists() else "N/A"
-        diag_link = f"[`Report`](file:///{r['report'].as_posix()})" if r['report'].exists() else "None (Clean)"
+        vcd_link = f"[`{r['module']}.vcd`]({r['module']}.vcd)" if r['vcd'].exists() else "N/A"
+        diag_link = f"[`Report`]({r['report'].name})" if r['report'].exists() else "None (Clean)"
         md_content += f"| **{r['module']}** | {status_badge} | {r['errors']} | {vcd_link} | {diag_link} |\n"
 
     with open(md_file, "w", encoding="utf-8") as f:
         f.write(md_content)
 
-    # HTML Dashboard
+    # HTML Dashboard (Portable relative links)
     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -457,8 +534,8 @@ def generate_dashboard(results: list):
 """
     for r in results:
         badge = '<span class="badge-pass">PASSED</span>' if r["status"] == "PASSED" else '<span class="badge-fail">FAILED</span>'
-        vcd_str = f'<a href="file:///{r["vcd"].as_posix()}">{r["module"]}.vcd</a>' if r['vcd'].exists() else "N/A"
-        diag_str = f'<a href="file:///{r["report"].as_posix()}">Report</a>' if r['report'].exists() else "None (Clean)"
+        vcd_str = f'<a href="{r["vcd"].name}">{r["module"]}.vcd</a>' if r['vcd'].exists() else "N/A"
+        diag_str = f'<a href="{r["report"].name}">Report</a>' if r['report'].exists() else "None (Clean)"
         html_content += f'<tr><td><strong>{r["module"]}</strong></td><td>{badge}</td><td>{r["errors"]}</td><td>{vcd_str}</td><td>{diag_str}</td></tr>\n'
 
     html_content += """    </tbody>
@@ -471,12 +548,11 @@ def generate_dashboard(results: list):
         f.write(html_content)
 
     print(f"\n[DASHBOARD] Generated Regression Dashboard:")
-    print(f"  Markdown: {md_file}")
-    print(f"  HTML:     {html_file}")
+    print(f"  Markdown: logs/regression_dashboard.md")
+    print(f"  HTML:     logs/regression_dashboard.html")
 
 def run_regression(no_ai: bool, regen_tb: bool, model_name: str, auto_heal: bool, apply_candidate: bool) -> bool:
     """Run full verification regression suite across all DUTs in dut/."""
-    # Only verify primary DUT modules (exclude candidate or backup files)
     dut_files = sorted([f for f in DUT_DIR.glob("*.v") if not f.name.endswith(("_candidate.v", "_bak.v"))])
     if not dut_files:
         print(f"[ERROR] No Verilog DUT files found in {DUT_DIR}")

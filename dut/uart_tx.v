@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 
 /**
- * UART Transmitter with Configurable Baud Rate and Parity
+ * UART Transmitter with Configurable Baud Rate and Latched Parity
  *
  * Parameters:
  *   CLKS_PER_BIT : Clock cycles per baud period (default 10 for simulation)
@@ -34,18 +34,20 @@ module uart_tx #(
     reg [15:0] clk_count;
     reg [2:0]  bit_index;
     reg [7:0]  tx_data;
+    reg [1:0]  tx_parity_mode; // Latched parity mode throughout transmission
     reg        parity_bit;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state      <= STATE_IDLE;
-            clk_count  <= 16'd0;
-            bit_index  <= 3'd0;
-            tx_data    <= 8'd0;
-            parity_bit <= 1'b0;
-            tx         <= 1'b1; // Idle UART line is HIGH
-            tx_busy    <= 1'b0;
-            tx_done    <= 1'b0;
+            state          <= STATE_IDLE;
+            clk_count      <= 16'd0;
+            bit_index      <= 3'd0;
+            tx_data        <= 8'd0;
+            tx_parity_mode <= 2'b00;
+            parity_bit     <= 1'b0;
+            tx             <= 1'b1; // Idle UART line is HIGH
+            tx_busy        <= 1'b0;
+            tx_done        <= 1'b0;
         end else begin
             tx_done <= 1'b0; // Default single-cycle pulse
 
@@ -57,10 +59,11 @@ module uart_tx #(
                     bit_index <= 3'd0;
 
                     if (tx_start) begin
-                        tx_data   <= din;
-                        tx_busy   <= 1'b1;
-                        tx        <= 1'b0; // Drive Start bit (LOW)
-                        state     <= STATE_START;
+                        tx_data        <= din;
+                        tx_parity_mode <= parity_mode; // Latch parity mode on start
+                        tx_busy        <= 1'b1;
+                        tx             <= 1'b0;        // Drive Start bit (LOW)
+                        state          <= STATE_START;
 
                         if (parity_mode == 2'b01)
                             parity_bit <= ~(^din); // Odd parity
@@ -92,7 +95,8 @@ module uart_tx #(
                             tx        <= tx_data[bit_index + 1];
                         end else begin
                             bit_index <= 3'd0;
-                            if (parity_mode != 2'b00) begin
+                            // Check latched parity mode, unaffected by external wire changes
+                            if (tx_parity_mode != 2'b00) begin
                                 tx    <= parity_bit;
                                 state <= STATE_PARITY;
                             end else begin

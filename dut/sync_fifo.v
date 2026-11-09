@@ -5,7 +5,7 @@
  * 
  * Parameters:
  *   DATA_WIDTH : Width of data words (default 8)
- *   DEPTH      : Number of words in FIFO (default 16)
+ *   DEPTH      : Number of words in FIFO (default 16, supports DEPTH >= 1)
  *
  * Ports:
  *   clk, rst_n : Clock and active-low asynchronous reset
@@ -21,20 +21,21 @@ module sync_fifo #(
     parameter DATA_WIDTH = 8,
     parameter DEPTH      = 16
 ) (
-    input  wire                   clk,
-    input  wire                   rst_n,
-    input  wire                   wr_en,
-    input  wire [DATA_WIDTH-1:0]  din,
-    input  wire                   rd_en,
-    output reg  [DATA_WIDTH-1:0]  dout,
-    output wire                   full,
-    output wire                   empty,
-    output reg                    overflow,
-    output reg                    underflow,
-    output reg  [$clog2(DEPTH):0] count
+    input  wire                                   clk,
+    input  wire                                   rst_n,
+    input  wire                                   wr_en,
+    input  wire [DATA_WIDTH-1:0]                  din,
+    input  wire                                   rd_en,
+    output reg  [DATA_WIDTH-1:0]                  dout,
+    output wire                                   full,
+    output wire                                   empty,
+    output reg                                    overflow,
+    output reg                                    underflow,
+    output reg  [$clog2(DEPTH < 2 ? 2 : DEPTH):0] count
 );
 
-    localparam ADDR_WIDTH = $clog2(DEPTH);
+    localparam ADDR_WIDTH = (DEPTH > 1) ? $clog2(DEPTH) : 1;
+    localparam COUNT_WIDTH = $clog2(DEPTH < 2 ? 2 : DEPTH) + 1;
 
     // Memory array
     reg [DATA_WIDTH-1:0] mem [0:DEPTH-1];
@@ -43,7 +44,7 @@ module sync_fifo #(
     reg [ADDR_WIDTH-1:0] wr_ptr;
     reg [ADDR_WIDTH-1:0] rd_ptr;
 
-    assign empty = (count == 0);
+    assign empty = (count == {COUNT_WIDTH{1'b0}});
     assign full  = (count == DEPTH);
 
     // Synchronous Write & Read Logic
@@ -52,7 +53,7 @@ module sync_fifo #(
             wr_ptr    <= {ADDR_WIDTH{1'b0}};
             rd_ptr    <= {ADDR_WIDTH{1'b0}};
             dout      <= {DATA_WIDTH{1'b0}};
-            count     <= {($clog2(DEPTH)+1){1'b0}};
+            count     <= {COUNT_WIDTH{1'b0}};
             overflow  <= 1'b0;
             underflow <= 1'b0;
         end else begin

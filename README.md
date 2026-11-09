@@ -11,8 +11,8 @@ The framework provides robust, self-checking directed and constrained-random ver
 | IP Module | Location | Testbench | Key Verification Features |
 | :--- | :--- | :--- | :--- |
 | **ALU** | `dut/alu.v` | `testbenches/tb_alu.v` | Parameterized bitwidth, arithmetic overflow/underflow, standardized subtraction borrow flag `(a < b)`, zero flag, and 500-vector randomized stress test. |
-| **Sync FIFO** | `dut/sync_fifo.v` | `testbenches/tb_sync_fifo.v` | Arbitrary `DEPTH` circular pointer wrapping, boundary collision handling (simultaneous R/W on empty and full), overflow/underflow protection, shadow queue reference model, and 500 random operations. |
-| **UART TX** | `dut/uart_tx.v` | `testbenches/tb_uart_tx.v` | Configurable `CLKS_PER_BIT`, all parity modes (None, Odd, Even), full-duration stop-bit holding, back-to-back zero-idle transmissions, and cycle-by-cycle frame checks. |
+| **Sync FIFO** | `dut/sync_fifo.v` | `testbenches/tb_sync_fifo.v` | Verified across `DEPTH=1` (minimal single-word), `DEPTH=5` (arbitrary non-power-of-two modulo wrap), and `DEPTH=16` (full capacity), with boundary collision handling (simultaneous R/W on empty/full) and 500-cycle randomized shadow queue testing. |
+| **UART TX** | `dut/uart_tx.v` | `testbenches/tb_uart_tx.v` | Synchronously latched `parity_mode` immune to pin changes during active frames, exact 1-cycle `tx_done` pulse, continuous `tx_busy` monitoring, zero-idle consecutive frames, and 30 randomized frames across None, Odd, and Even modes. |
 
 ---
 

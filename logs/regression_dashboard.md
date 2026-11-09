@@ -5,6 +5,6 @@
 
 | Module | Status | Errors | VCD Waveform | Diagnostics |
 | :--- | :---: | :---: | :--- | :--- |
-| **alu** | ✅ PASSED | 0 | [`alu.vcd`](file:///C:/Users/91900/.gemini/antigravity/scratch/ai_verification/logs/alu.vcd) | None (Clean) |
-| **sync_fifo** | ✅ PASSED | 0 | [`sync_fifo.vcd`](file:///C:/Users/91900/.gemini/antigravity/scratch/ai_verification/logs/sync_fifo.vcd) | None (Clean) |
-| **uart_tx** | ✅ PASSED | 0 | [`uart_tx.vcd`](file:///C:/Users/91900/.gemini/antigravity/scratch/ai_verification/logs/uart_tx.vcd) | None (Clean) |
+| **alu** | ✅ PASSED | 0 | [`alu.vcd`](alu.vcd) | None (Clean) |
+| **sync_fifo** | ✅ PASSED | 0 | [`sync_fifo.vcd`](sync_fifo.vcd) | None (Clean) |
+| **uart_tx** | ✅ PASSED | 0 | [`uart_tx.vcd`](uart_tx.vcd) | None (Clean) |
