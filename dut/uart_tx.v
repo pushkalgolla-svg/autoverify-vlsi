@@ -6,6 +6,12 @@
  * Parameters:
  *   CLKS_PER_BIT : Clock cycles per baud period (default 10 for simulation)
  *
+ * Parity Modes (parity_mode):
+ *   2'b00 : No Parity
+ *   2'b01 : Odd Parity
+ *   2'b10 : Even Parity
+ *   2'b11 : Reserved / Unsupported (safely treated as No Parity)
+ *
  * States:
  *   IDLE, START, DATA, PARITY, STOP
  */
@@ -17,7 +23,7 @@ module uart_tx #(
     input  wire       rst_n,
     input  wire       tx_start,
     input  wire [7:0] din,
-    input  wire [1:0] parity_mode, // 2'b00: None, 2'b01: Odd, 2'b10: Even
+    input  wire [1:0] parity_mode, // 2'b00: None, 2'b01: Odd, 2'b10: Even, 2'b11: Reserved
     output reg        tx,
     output reg        tx_busy,
     output reg        tx_done
@@ -70,7 +76,7 @@ module uart_tx #(
                         else if (parity_mode == 2'b10)
                             parity_bit <= ^din;    // Even parity
                         else
-                            parity_bit <= 1'b0;
+                            parity_bit <= 1'b0;    // 2'b00 (None) or 2'b11 (Reserved/Unsupported)
                     end
                 end
 
@@ -95,8 +101,9 @@ module uart_tx #(
                             tx        <= tx_data[bit_index + 1];
                         end else begin
                             bit_index <= 3'd0;
-                            // Check latched parity mode, unaffected by external wire changes
-                            if (tx_parity_mode != 2'b00) begin
+                            // Supported parity: 2'b01 (Odd), 2'b10 (Even).
+                            // 2'b00 (None) and unsupported 2'b11 safely proceed to STOP state.
+                            if (tx_parity_mode == 2'b01 || tx_parity_mode == 2'b10) begin
                                 tx    <= parity_bit;
                                 state <= STATE_PARITY;
                             end else begin

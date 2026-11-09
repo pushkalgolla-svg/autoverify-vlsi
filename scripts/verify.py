@@ -447,20 +447,27 @@ Please provide a structured report with:
                 backup_path = dut_path.with_suffix(".v.bak")
                 shutil.copyfile(dut_path, backup_path)
                 print(f"[SELF-HEALING] Backup created at: {backup_path.name}")
-                shutil.copyfile(candidate_path, dut_path)
-                print(f"[SELF-HEALING] Applied verified candidate to {dut_path.name}. Running full verification...")
-
-                final_ok = run_pipeline(dut_path, no_ai=True)
-                if not final_ok:
-                    print(f"⚠️ [SAFETY ROLLBACK] Verification failed after applying candidate! Restoring {dut_path.name} from backup...")
-                    shutil.copyfile(backup_path, dut_path)
-                    print(f"[SAFETY ROLLBACK] Original {dut_path.name} restored successfully.")
+                applied_successfully = False
+                try:
+                    shutil.copyfile(candidate_path, dut_path)
+                    print(f"[SELF-HEALING] Applied verified candidate to {dut_path.name}. Running full verification...")
+                    final_ok = run_pipeline(dut_path, no_ai=True)
+                    if final_ok:
+                        applied_successfully = True
+                        print(f"🎉 [SELF-HEALING] Candidate successfully verified and deployed.")
+                        return True
+                    else:
+                        print(f"⚠️ [SAFETY ROLLBACK] Verification failed after applying candidate! Restoring {dut_path.name} from backup...")
+                        return False
+                except (Exception, KeyboardInterrupt) as exc:
+                    print(f"⚠️ [SAFETY ROLLBACK] Unexpected exception/timeout during verification ({exc})! Restoring {dut_path.name} from backup...")
                     return False
-                else:
-                    print(f"🎉 [SELF-HEALING] Candidate successfully verified and deployed.")
+                finally:
+                    if not applied_successfully and backup_path.exists():
+                        shutil.copyfile(backup_path, dut_path)
+                        print(f"[SAFETY ROLLBACK] Original {dut_path.name} safely restored from backup.")
                     if backup_path.exists():
                         backup_path.unlink()
-                    return True
             elif auto_heal:
                 print("[NOTICE] Auto-heal candidate evaluated. Pass '--apply-candidate' to apply verified candidate to RTL.")
     except Exception as e:

@@ -10,9 +10,9 @@ The framework provides robust, self-checking directed and constrained-random ver
 
 | IP Module | Location | Testbench | Key Verification Features |
 | :--- | :--- | :--- | :--- |
-| **ALU** | `dut/alu.v` | `testbenches/tb_alu.v` | Parameterized bitwidth, arithmetic overflow/underflow, standardized subtraction borrow flag `(a < b)`, zero flag, and 500-vector randomized stress test. |
+| **ALU** | `dut/alu.v` | `testbenches/tb_alu.v` | Parameterized bitwidth verified across `DATA_WIDTH` 8, 16, and 32 bits, standardized subtraction borrow flag `(a < b)`, zero flag, and 600 width-independent randomized test vectors. |
 | **Sync FIFO** | `dut/sync_fifo.v` | `testbenches/tb_sync_fifo.v` | Verified across `DEPTH=1` (minimal single-word), `DEPTH=5` (arbitrary non-power-of-two modulo wrap), and `DEPTH=16` (full capacity), with boundary collision handling (simultaneous R/W on empty/full) and 500-cycle randomized shadow queue testing. |
-| **UART TX** | `dut/uart_tx.v` | `testbenches/tb_uart_tx.v` | Synchronously latched `parity_mode` immune to pin changes during active frames, exact 1-cycle `tx_done` pulse, continuous `tx_busy` monitoring, zero-idle consecutive frames, and 30 randomized frames across None, Odd, and Even modes. |
+| **UART TX** | `dut/uart_tx.v` | `testbenches/tb_uart_tx.v` | Synchronously latched `parity_mode` immune to pin changes during active frames, unsupported mode `2'b11` defined as No Parity, exact 1-cycle `tx_done` pulse returning LOW on the immediate next clock, verified 1-cycle consecutive frame line gap, and 30 randomized frames across all modes. |
 
 ---
 
