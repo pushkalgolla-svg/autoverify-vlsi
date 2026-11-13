@@ -48,6 +48,7 @@ jobs:
             logs/regression_dashboard.md
             logs/regression_dashboard.html
             logs/coverage_report.md
+            logs/toggle_report.md
             logs/*_sim.log
             logs/*.vcd
             examples/faulty_rtl/alu_healing_report.md

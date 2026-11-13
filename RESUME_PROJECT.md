@@ -9,7 +9,8 @@ An automated digital EDA verification platform pairing **Icarus Verilog (`iveril
 Copy-paste ready bullet points tailored for **ASIC / FPGA / Digital Design & Verification Engineer** roles (NVIDIA, Qualcomm, AMD, Apple, Intel, Synopsys, Cadence):
 
 > * **Architected an Automated Digital Verification Framework** in Python integrating Icarus Verilog (`iverilog`), VVP, and GTKWave with optional Google Gemini LLM orchestration, enabling automated testbench synthesis, regression tracking, and failure triage across multiple digital IP cores.
-> * **Designed Self-Checking Constrained-Random & Boundary Testbenches** with cycle-accurate reference models and explicit procedural coverage tracking, achieving 100% functional coverage (118/118 bins) and executing 22,000+ assertion checks across ALU, Synchronous FIFO, and UART IP cores.
+> * **Designed Self-Checking Constrained-Random & Boundary Testbenches** with cycle-accurate reference models, explicit procedural coverage tracking, and automated VCD toggle coverage analysis, achieving 100% functional coverage (119/119 bins), 100% reachable toggle coverage, and executing 25,600+ assertion checks across ALU, Synchronous FIFO, and UART IP cores.
+> * **Authored Dual-Tier Verification Models** providing portable Verilog-2012 procedural coverage/assertions for open-source CI alongside IEEE 1800 SystemVerilog reference packages (`covergroup`, `coverpoint`, `cross`) for commercial sign-off in Synopsys VCS, Cadence Xcelium, and Siemens Questa.
 > * **Engineered an Automated Failure Diagnostic Pipeline** that parses simulation logs, classifies root causes between RTL logic faults and testbench specification discrepancies, and pre-validates isolated candidate patches in sandboxes before human review.
 > * **Constructed Portable Verification & CI Automation** using GitHub Actions and Python, enforcing deterministic regression testing with zero testbench clock-edge race conditions, automated artifact cleanup, and unified HTML/Markdown coverage dashboard generation.
 
@@ -28,14 +29,16 @@ When an interviewer asks: *"Tell me about a challenging or unique VLSI/hardware 
 ### **Action (Implementation)**
 > * *"I implemented **AutoVerify-VLSI**, a Python orchestrator connecting local EDA tools (`iverilog`, `vvp`, `gtkwave`) with optional LLM diagnostic capabilities."*
 > * *"I hardened three digital IP cores and their self-checking testbenches:
->   1. **ALU (`dut/alu.v`)**: Verified across 8, 16, and 32-bit parameterized configurations with width-independent randomized stimulus and reference calculations, resolved subtraction borrow/underflow conventions `(a < b)` between RTL and golden models, and tracked 42 functional coverage bins across 1,900+ checks.
->   2. **Synchronous FIFO (`dut/sync_fifo.v`)**: Handled arbitrary `DEPTH` pointer wrapping (including DEPTH=1, DEPTH=5, and DEPTH=16), fixed simultaneous read/write race conditions on empty and full boundaries, tracked 46 coverage bins across 13,400+ checks, and integrated shadow queue reference verification.
->   3. **UART Transmitter (`dut/uart_tx.v`)**: Corrected premature stop-bit termination, latched parity configuration on transmission start, defined unsupported parity modes (`2'b11`), eliminated clock-edge race conditions, reconstructed serial frames bit-for-bit, and tracked 30 coverage bins across 6,700+ checks.*\"*
+>   1. **ALU (`dut/alu.v`)**: Verified across 8, 16, and 32-bit parameterized configurations with width-independent randomized stimulus and reference calculations, resolved subtraction borrow/underflow conventions `(a < b)` between RTL and golden models, and tracked 42 functional coverage bins across 1,900+ checks (100% toggle coverage).
+>   2. **Synchronous FIFO (`dut/sync_fifo.v`)**: Handled arbitrary `DEPTH` pointer wrapping (including DEPTH=1, DEPTH=5, and DEPTH=16), fixed simultaneous read/write race conditions on empty and full boundaries, tracked 46 coverage bins across 13,490 checks, and integrated shadow queue reference verification (100% reachable toggle coverage).
+>   3. **UART Transmitter (`dut/uart_tx.v`)**: Corrected premature stop-bit termination, latched parity configuration on transmission start, defined unsupported parity modes (`2'b11`), eliminated clock-edge race conditions, reconstructed serial frames bit-for-bit, verified real-world 115,200 Baud @ 100MHz clock (`CLKS_PER_BIT = 868`) cycle-accurately, and tracked 31 coverage bins across 10,200+ checks (100% reachable toggle coverage).*\"*
 > * *\"I eliminated clock-edge race conditions in the testbenches by driving inputs on negative clock edges and sampling outputs with explicit delta delays after positive edges.\"*
+> * *\"I built an automated VCD toggle coverage analyzer (`scripts/toggle_coverage.py`) that audits bit transitions, identifies parameter-tied bits, and reports 100% reachable coverage.\"*
+> * *\"I designed a dual-tier verification architecture: portable Verilog-2012 procedural coverage for open-source CI, paired with production IEEE 1800 SystemVerilog reference covergroups in `testbenches/systemverilog/` for commercial EDA environments.\"*
 > * *\"I established an automated regression runner (`scripts/verify.py`) with strict exit code validation, stale artifact elimination, watchdog timeouts, candidate patch isolation, and GitHub Actions CI automation.\"*
 
 ### **Result (Impact)**
-> *\"Achieved 100% pass rates across all three IP cores with 100% functional coverage (118/118 bins covered across 22,059 assertion checks). Established an automated regression suite with full waveform generation and comprehensive HTML/Markdown summary reports, running deterministically in under 5 seconds.\"*
+> *\"Achieved 100% pass rates across all three IP cores with 100% functional coverage (119/119 bins covered across 25,624 assertion checks) and 100% reachable toggle coverage (355/355 bit nodes). Established an automated regression suite with full waveform generation and comprehensive HTML/Markdown summary reports, running deterministically in under 5 seconds.\"*
 
 ---
 

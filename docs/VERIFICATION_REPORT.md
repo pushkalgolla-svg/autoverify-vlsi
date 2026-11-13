@@ -3,19 +3,19 @@
 **Date:** November 2026  
 **Environment:** Icarus Verilog (`iverilog -g2012`), VVP runtime, GTKWave  
 **Regression Status:** 🟢 **ALL 3 MODULES PASSED (0 ERRORS)**  
-**Assertion Checks Executed:** 22,059 / 22,059 Passed (100.0%)  
-**Functional Coverage:** 100.0% (118 / 118 Bins Covered)  
-**Methodology:** Portable Procedural Assertions & Explicit Binned Functional Coverage (Verilog-2012)  
-*(Note: To maintain 100% open-source toolchain portability, this framework does not use proprietary UVM or SystemVerilog formal tools).*
+**Assertion Checks Executed:** 25,624 / 25,624 Passed (100.0%)  
+**Functional Coverage:** 100.0% (119 / 119 Bins Covered)  
+**Reachable Toggle Coverage:** 100.0% (355 / 355 Reachable Bit Nodes Full Toggle)  
+**Methodology:** Dual-Tier Verification: Portable Verilog-2012 Procedural Assertions/Bins for Open-Source CI + IEEE 1800 SystemVerilog Reference Packages for Commercial EDA  
 
 ---
 
 ## 1. Executive Summary
 
-This report documents the verification audit, root-cause bug isolation, functional coverage closure, and CI automation of the **AutoVerify-VLSI** digital IP portfolio:
-1. **ALU (`dut/alu.v`)**: Parameterized Arithmetic Logic Unit (verified across `DATA_WIDTH = 8, 16, 32` with 1,917 checks and 42 coverage bins).
-2. **Synchronous FIFO (`dut/sync_fifo.v`)**: Arbitrary Depth Circular Buffer (verified across `DEPTH = 1, 5, 16` with 13,407 checks and 46 coverage bins).
-3. **UART Transmitter (`dut/uart_tx.v`)**: Serializer with Latched Parity, Protocol Frame Reconstruction, and Handshake Verification (6,735 checks and 30 coverage bins).
+This report documents the verification audit, root-cause bug isolation, functional coverage closure, toggle coverage analysis, and CI automation of the **AutoVerify-VLSI** digital IP portfolio:
+1. **ALU (`dut/alu.v`)**: Parameterized Arithmetic Logic Unit (verified across `DATA_WIDTH = 8, 16, 32` with 1,917 checks and 42 coverage bins; 100.0% toggle coverage).
+2. **Synchronous FIFO (`dut/sync_fifo.v`)**: Arbitrary Depth Circular Buffer (verified across `DEPTH = 1, 5, 16` with 13,490 checks and 46 coverage bins; 100.0% reachable toggle coverage).
+3. **UART Transmitter (`dut/uart_tx.v`)**: Serializer with Latched Parity, Protocol Frame Reconstruction, Handshake Verification, and **Real Hardware 115,200 Baud @ 100MHz clock verification** (10,217 checks and 31 coverage bins; 100.0% reachable toggle coverage).
 
 All testbenches drive inputs on negative clock edges (`@(negedge clk)`) and sample outputs post-NBA (`@(posedge clk); #1;`) to eliminate simulator race conditions.
 
@@ -108,7 +108,8 @@ All assertions are implemented as portable procedural checks evaluating post-NBA
 | | Handshake Pulses | 3 | Busy active, single-cycle done pulse, immediate low next clock |
 | | Inter-Frame Gaps | 3 | Measured gaps across delay 0 (1-clk), delay 3 (4-clk), delay 7 (8-clk) |
 | | Stress Testing | 1 | 30 random frames across all configurations |
-| **TOTAL** | — | **118** | **118 / 118 Bins Hit (100.0% Functional Coverage)** |
+| | Hardware Baud Rate | 1 | **115,200 Baud @ 100MHz clock (`CLKS_PER_BIT = 868`)** cycle-accurate frames |
+| **TOTAL** | — | **119** | **119 / 119 Bins Hit (100.0% Functional Coverage)** |
 
 ---
 
@@ -120,19 +121,48 @@ All tests executed with Icarus Verilog v12 and VVP:
 =================================================================
  STARTING REGRESSION SUITE (3 Modules Found) 
 =================================================================
-[PASS] alu.v        : 0 Errors | 1,917 Checks | 100.0% Coverage (42/42 Bins)
-[PASS] sync_fifo.v  : 0 Errors | 13,407 Checks | 100.0% Coverage (46/46 Bins)
-[PASS] uart_tx.v    : 0 Errors | 6,735 Checks  | 100.0% Coverage (30/30 Bins)
+[PASS] alu.v        : 0 Errors | 1,917 Checks  | 100.0% Coverage (42/42 Bins)  | 100.0% Toggle Cov
+[PASS] sync_fifo.v  : 0 Errors | 13,490 Checks | 100.0% Coverage (46/46 Bins)  | 100.0% Reachable Toggle Cov
+[PASS] uart_tx.v    : 0 Errors | 10,217 Checks | 100.0% Coverage (31/31 Bins)  | 100.0% Reachable Toggle Cov
 =================================================================
 Overall Pass Rate: 100.0% (3/3 Passed, 0 Failed)
-Total Assertions: 22,059 Checks (100.0% Passed)
-Total Functional Coverage: 118 / 118 Bins (100.0%)
-Regression Duration: ~4.5 seconds
+Total Assertions: 25,624 Checks (100.0% Passed)
+Total Functional Coverage: 119 / 119 Bins (100.0%)
+Reachable Toggle Coverage: 355 / 355 Bit Nodes (100.0%)
+Regression Duration: ~4.8 seconds
 ```
 
 ---
 
-## 5. AI Self-Healing Workflow & Safety Guardrails
+## 5. Automated VCD Toggle Coverage Analysis
+
+Bit-level transition analysis performed via `scripts/toggle_coverage.py` on simulation waveforms:
+
+| Module | DUT Signals | Total Bits | Full Toggles (0<->1) | Parameter Bounded | Reachable Bits | Reachable Cov % |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`alu`** | 18 | 180 | 180 | 0 | 180 | **100.0%** |
+| **`sync_fifo`** | 39 | 99 | 95 | 4 | 95 | **100.0%** |
+| **`uart_tx`** | 28 | 98 | 80 | 18 | 80 | **100.0%** |
+| **Total** | **85** | **377** | **355** | **22** | **355** | **100.0%** |
+
+*Parameter Tie-Off Justification:*
+- In `sync_fifo`, unused MSBs of depth-bounded counters (e.g. `count[1]` on `DEPTH=1`, `count[3]` on `DEPTH=5`) and single-word address pointers are architecturally unreachable.
+- In `uart_tx`, the upper unused bits of generic 16-bit baud countdown registers (e.g. bits 4..15 on `CLKS_PER_BIT=16`, bits 10..15 on `CLKS_PER_BIT=868`) are bounded by parameter limits.
+- Full details documented in `logs/toggle_report.md`.
+
+---
+
+## 6. SystemVerilog IEEE 1800 Reference Tier
+
+For commercial sign-off in Synopsys VCS, Cadence Xcelium, and Siemens Questa, production-grade reference models are provided in `testbenches/systemverilog/`:
+- `alu_coverage.sv`: Parameterized `alu_coverage_model #(DATA_WIDTH)` with `covergroup` and cross-coverage for operations and boundary flags.
+- `fifo_coverage.sv`: Parameterized `fifo_coverage_model #(DATA_WIDTH, DEPTH)` auditing occupancy, error flags, and simultaneous R/W collisions.
+- `uart_coverage.sv`: `uart_coverage_model` auditing parity modes, handshake transitions `(0 => 1 => 0)`, data patterns, and busy rejection.
+- `README.md`: Compilation and UCDB/VDB coverage database generation guides.
+
+---
+
+## 7. AI Self-Healing Workflow & Safety Guardrails
 
 The framework provides an optional, credible AI-assisted repair capability:
 - **Isolated Demonstration Module:** Located in `examples/faulty_rtl/alu_faulty.v` with an injected borrow flag defect.

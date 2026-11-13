@@ -367,6 +367,24 @@ module tb_sync_fifo();
         cov_wr_wrap_1 = 1; cov_rd_wrap_1 = 1; // DEPTH=1 wraps every cycle
         assert_cond(dout_1 === 8'hD4 && empty_1 === 1'b1 && count_1 === 2'd0,
                     "DEPTH=1: Final read must return 0xD4 and leave FIFO empty");
+
+        // 1.7 Toggle coverage data patterns (0x55 and 0xAA to toggle all data bus bits)
+        @(negedge clk);
+        wr_en_1 = 1'b1; din_1 = 8'h55;
+        @(negedge clk);
+        wr_en_1 = 1'b0; rd_en_1 = 1'b1; din_1 = 8'h00;
+        @(negedge clk);
+        rd_en_1 = 1'b0;
+        assert_cond(dout_1 === 8'h55, "DEPTH=1: Toggle pattern 0x55 matched");
+
+        @(negedge clk);
+        wr_en_1 = 1'b1; din_1 = 8'hAA;
+        @(negedge clk);
+        wr_en_1 = 1'b0; rd_en_1 = 1'b1; din_1 = 8'h00;
+        @(negedge clk);
+        rd_en_1 = 1'b0;
+        assert_cond(dout_1 === 8'hAA, "DEPTH=1: Toggle pattern 0xAA matched");
+
         $display("[PASS] DEPTH=1 verification completed successfully.");
 
         // ---------------------------------------------------------------------
@@ -667,6 +685,14 @@ module tb_sync_fifo();
             assert_cond(dout_16 === exp_val, "Post-random drain data mismatch with shadow queue");
         end
         $display("[PASS] Completed 500 random stress cycles (DEPTH=16).");
+
+        // Exercise active-low reset assertion & recovery for complete toggle verification
+        @(negedge clk);
+        rst_n = 1'b0;
+        #(CLK_PERIOD * 2);
+        @(negedge clk);
+        rst_n = 1'b1;
+        #(CLK_PERIOD * 2);
 
         // =====================================================================
         // FUNCTIONAL COVERAGE AUDIT & REPORTING

@@ -29,6 +29,9 @@ TB_DIR = ROOT_DIR / "testbenches"
 LOGS_DIR = ROOT_DIR / "logs"
 ENV_FILE = ROOT_DIR / ".env"
 
+# Ensure scripts directory is on sys.path for local module imports
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 def load_env():
     """Load GEMINI_API_KEY from .env if present (standard library parser)."""
     if ENV_FILE.exists():
@@ -603,7 +606,7 @@ def generate_dashboard(results: list):
         cov_str = f"{r['coverage']['cov_pct']:.1f}% ({r['coverage']['covered_bins']}/{r['coverage']['total_bins']})"
         md_content += f"| **{r['module']}** | {status_badge} | {r['errors']} | {r['coverage']['total_checks']:,} | {cov_str} | {vcd_link} | {diag_link} |\n"
 
-    md_content += f"\nDetailed coverage audit available in: [`coverage_report.md`](coverage_report.md)\n"
+    md_content += f"\nDetailed reports: [`coverage_report.md`](coverage_report.md) (Functional Coverage) | [`toggle_report.md`](toggle_report.md) (VCD Toggle Coverage)\n"
 
     with open(md_file, "w", encoding="utf-8") as f:
         f.write(md_content)
@@ -653,7 +656,7 @@ def generate_dashboard(results: list):
 
     html_content += """    </tbody>
   </table>
-  <p style="margin-top: 20px; font-size: 14px; color: #94a3b8;">Detailed breakdown report: <a href="coverage_report.md">coverage_report.md</a></p>
+  <p style="margin-top: 20px; font-size: 14px; color: #94a3b8;">Detailed reports: <a href="coverage_report.md">coverage_report.md</a> (Functional Coverage) | <a href="toggle_report.md">toggle_report.md</a> (VCD Toggle Coverage)</p>
 </div>
 </body>
 </html>"""
@@ -719,9 +722,16 @@ def run_regression(no_ai: bool, regen_tb: bool, model_name: str, auto_heal: bool
 
     generate_dashboard(results)
     generate_coverage_report(results)
-    return all_passed
 
-    generate_dashboard(results)
+    # Automated Toggle Coverage Audit across all generated VCDs
+    try:
+        from toggle_coverage import analyze_all_vcds, generate_toggle_markdown_report
+        toggle_res = analyze_all_vcds(LOGS_DIR)
+        generate_toggle_markdown_report(toggle_res)
+        print("  Toggle Cov: logs/toggle_report.md")
+    except Exception as e:
+        print(f"[!] Toggle coverage generation warning: {e}")
+
     return all_passed
 
 def main():

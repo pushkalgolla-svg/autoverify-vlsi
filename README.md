@@ -13,12 +13,27 @@ The framework provides robust, self-checking directed and constrained-random tes
 
 ## 📦 Verified RTL Cores & Coverage Overview
 
-| IP Module | Location | Testbench | Assertion Checks | Functional Coverage | Key Verification Scope |
-| :--- | :--- | :--- | :---: | :---: | :--- |
-| **ALU** | `dut/alu.v` | `testbenches/tb_alu.v` | 1,917 | **100.0%** (42/42 bins) | Multi-width parameterized verification across 8, 16, and 32 bits; all 4 opcodes; carry/overflow boundaries; borrow flag underflow boundaries (`a < b`); zero-result generation; extremum corners (MIN_MIN, MAX_MAX, MIN_MAX, MAX_MIN); 600+ randomized vectors. |
-| **Sync FIFO** | `dut/sync_fifo.v` | `testbenches/tb_sync_fifo.v` | 13,407 | **100.0%** (46/46 bins) | Verified across `DEPTH=1`, `DEPTH=5`, and `DEPTH=16`; occupancy states (empty, 1-item, intermediate, almost full, full); read-only, write-only, and simultaneous R/W; simultaneous collisions at empty, full, and intermediate occupancy; overflow/underflow flags; modulo pointer wrap; 500-cycle randomized shadow queue verification. |
-| **UART TX** | `dut/uart_tx.v` | `testbenches/tb_uart_tx.v` | 6,735 | **100.0%** (30/30 bins) | Bit-for-bit serial payload reconstruction; bit duration timing (`CLKS_PER_BIT`); all 4 parity modes (None, Odd, Even, Reserved `2'b11`); input patterns (All-0s, All-1s, Alternating 0x55/0xAA, Walking-1s); mid-frame parity latching; request rejection while busy; exact 1-cycle `tx_done` pulse; inter-frame gap measurements (0, 3, 7 delay cycles); 30 random frames. |
-| **TOTAL** | — | — | **22,059** | **100.0%** (118/118 bins) | **Zero functional errors. 100% coverage goals met.** |
+| IP Module | Location | Testbench | Assertion Checks | Functional Coverage | Reachable Toggle Cov | Key Verification Scope |
+| :--- | :--- | :--- | :---: | :---: | :---: | :--- |
+| **ALU** | `dut/alu.v` | `testbenches/tb_alu.v` | 1,917 | **100.0%** (42/42 bins) | **100.0%** (180/180 bits) | Multi-width parameterized verification across 8, 16, and 32 bits; all 4 opcodes; carry/overflow boundaries; borrow flag underflow boundaries (`a < b`); zero-result generation; extremum corners (MIN_MIN, MAX_MAX, MIN_MAX, MAX_MIN); 600+ randomized vectors. |
+| **Sync FIFO** | `dut/sync_fifo.v` | `testbenches/tb_sync_fifo.v` | 13,490 | **100.0%** (46/46 bins) | **100.0%** (95/95 bits) | Verified across `DEPTH=1`, `DEPTH=5`, and `DEPTH=16`; occupancy states (empty, 1-item, intermediate, almost full, full); read-only, write-only, and simultaneous R/W; simultaneous collisions at empty, full, and intermediate occupancy; overflow/underflow flags; modulo pointer wrap; 500-cycle randomized shadow queue verification. (4 parameter-bounded bits audited). |
+| **UART TX** | `dut/uart_tx.v` | `testbenches/tb_uart_tx.v` | 10,217 | **100.0%** (31/31 bins) | **100.0%** (80/80 bits) | Bit-for-bit serial payload reconstruction; nominal timing and real-world **115,200 Baud @ 100MHz clock (`CLKS_PER_BIT = 868`)** cycle-accurate verification (17,360 clock cycles); all 4 parity modes (None, Odd, Even, Reserved `2'b11`); input patterns (All-0s, All-1s, Alternating 0x55/0xAA, Walking-1s); mid-frame parity latching; request rejection while busy; exact 1-cycle `tx_done` pulse; inter-frame gap measurements (0, 3, 7 delay cycles); 30 random frames. |
+| **TOTAL** | — | — | **25,624** | **100.0%** (119/119 bins) | **100.0%** Reachable | **Zero functional errors. 100% functional & reachable toggle coverage.** |
+
+---
+
+## 🏛️ Verification Architecture: Dual-Tier Methodology
+
+AutoVerify-VLSI implements an intentional **dual-tier verification architecture** bridging open-source CI with commercial ASIC sign-off standards:
+
+1. **Tier 1: Portable Open-Source CI (`testbenches/tb_*.v`)**:
+   - Implements cycle-accurate assertions and procedural functional coverage counters compatible with **Icarus Verilog (`iverilog -g2012`)**.
+   - Generates IEEE standard Value Change Dumps (`.vcd`) analyzed by our automated Python toggle coverage engine (`scripts/toggle_coverage.py`).
+   - Runs deterministically offline without commercial licenses or external cloud dependencies.
+2. **Tier 2: Commercial Sign-Off Reference Tier (`testbenches/systemverilog/*_coverage.sv`)**:
+   - Object-oriented IEEE 1800 SystemVerilog packages (`alu_cov_pkg`, `fifo_cov_pkg`, `uart_cov_pkg`).
+   - Native `covergroup`, `coverpoint`, `cross`, and transition bins designed for **Synopsys VCS**, **Cadence Xcelium**, and **Siemens Questa**.
+   - See [`testbenches/systemverilog/README.md`](testbenches/systemverilog/README.md) for commercial compilation and UCDB export guides.
 
 ---
 
@@ -79,7 +94,14 @@ python scripts/demo_ai_healing.py
 ```
 *Demonstration outputs isolated candidate fix (`examples/faulty_rtl/alu_candidate.v`), unified patch diff (`examples/faulty_rtl/alu_healing_patch.diff`), and diagnostic report (`examples/faulty_rtl/alu_healing_report.md`).*
 
-### 4. Inspect Signal Waveforms in GTKWave
+### 4. Run Automated VCD Toggle Coverage Analyzer
+Analyze bit transitions ($0 \rightarrow 1$ and $1 \rightarrow 0$) across all signals from waveform dumps:
+```bash
+python scripts/toggle_coverage.py --all
+```
+*Outputs bit-level transitions, distinguishes architectural parameter tie-offs, and generates `logs/toggle_report.md`.*
+
+### 5. Inspect Signal Waveforms in GTKWave
 All testbenches generate portable VCD dumps in `logs/`:
 ```bash
 gtkwave logs/alu.vcd
@@ -92,9 +114,10 @@ gtkwave logs/uart_tx.vcd
 ## 📊 Verification Deliverables & Reports
 
 Each regression run automatically generates project-relative deliverables in `logs/`:
-- `logs/regression_dashboard.md`: Markdown summary table with status, total checks, and coverage metrics.
+- `logs/regression_dashboard.md`: Markdown summary table with status, total checks, functional coverage, and VCD links.
 - `logs/regression_dashboard.html`: Modern, shareable HTML regression dashboard.
-- `logs/coverage_report.md`: Dedicated functional coverage audit detailing all 118 bins and 22,059 assertion checks.
+- `logs/coverage_report.md`: Dedicated functional coverage audit detailing all 119 bins and 25,624 assertion checks.
+- `logs/toggle_report.md`: Complete bit-level toggle coverage audit (100% reachable coverage).
 - `logs/<module>_sim.log`: Full cycle-accurate simulation output logs.
 - `logs/<module>.vcd`: Signal transition traces for GTKWave debugging.
 

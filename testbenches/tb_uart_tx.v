@@ -51,6 +51,30 @@ module tb_uart_tx();
         .tx_done(tx_done)
     );
 
+    // =========================================================================
+    // INSTANCE 2: Real-World Hardware 115,200 Baud Configuration
+    // (CLKS_PER_BIT = 868 at 100MHz clock)
+    // =========================================================================
+    reg       tx_start_hw;
+    reg [7:0] din_hw;
+    reg [1:0] parity_mode_hw;
+    wire      tx_hw;
+    wire      tx_busy_hw;
+    wire      tx_done_hw;
+
+    uart_tx #(
+        .CLKS_PER_BIT(868) // 100MHz / 115,200 baud = 868 clock cycles per bit
+    ) dut_hw_115200 (
+        .clk(clk),
+        .rst_n(rst_n),
+        .tx_start(tx_start_hw),
+        .din(din_hw),
+        .parity_mode(parity_mode_hw),
+        .tx(tx_hw),
+        .tx_busy(tx_busy_hw),
+        .tx_done(tx_done_hw)
+    );
+
     // Clock generator
     initial begin
         clk = 1'b0;
@@ -98,6 +122,9 @@ module tb_uart_tx();
     // Constrained random (1 bin)
     integer cov_random_frames;
 
+    // Real hardware baud rate verification (1 bin)
+    integer cov_hw_baud;
+
     initial begin
         cov_mode_none = 0; cov_mode_odd = 0; cov_mode_even = 0; cov_mode_reserved = 0;
         cov_timing_start = 0; cov_timing_data = 0; cov_timing_parity = 0; cov_timing_stop = 0;
@@ -108,6 +135,7 @@ module tb_uart_tx();
         cov_busy_active = 0; cov_done_pulse_exact1 = 0; cov_done_imm_low = 0;
         cov_gap_delay0 = 0; cov_gap_delay3 = 0; cov_gap_delay7 = 0;
         cov_random_frames = 0;
+        cov_hw_baud = 0;
         total_errors = 0; total_checks = 0; passed_checks = 0; failed_checks = 0;
     end
 
@@ -131,13 +159,16 @@ module tb_uart_tx();
     task apply_reset;
         begin
             @(negedge clk);
-            rst_n       = 1'b0;
-            tx_start    = 1'b0;
-            din         = 8'h00;
-            parity_mode = 2'b00;
+            rst_n          = 1'b0;
+            tx_start       = 1'b0;
+            din            = 8'h00;
+            parity_mode    = 2'b00;
+            tx_start_hw    = 1'b0;
+            din_hw         = 8'h00;
+            parity_mode_hw = 2'b00;
             #(CLK_PERIOD * 3);
             @(negedge clk);
-            rst_n       = 1'b1;
+            rst_n          = 1'b1;
             #(CLK_PERIOD * 2);
         end
     endtask
@@ -409,6 +440,110 @@ module tb_uart_tx();
         end
     endtask
 
+    // Task to verify real hardware baud rate (115,200 baud @ 100MHz clock: CLKS_PER_BIT = 868)
+    task verify_hw_baud_115200;
+        integer c_idx;
+        integer b_idx;
+        reg [7:0] rx_payload;
+        reg       rx_parity;
+        begin
+            $display("\n--- [Test 11] Real Hardware Baud Rate Verification (115,200 Baud @ 100MHz: CLKS_PER_BIT = 868) ---");
+            
+            // Frame 1: 0xA5 with Odd Parity
+            @(negedge clk);
+            din_hw = 8'hA5;
+            parity_mode_hw = 2'b01; // Odd parity
+            tx_start_hw = 1'b1;
+
+            @(negedge clk);
+            tx_start_hw = 1'b0;
+
+            assert_cond(tx_busy_hw === 1'b1, "HW Baud Frame 1: tx_busy asserts immediately on start");
+
+            // Start bit: exactly 868 clock cycles of 0
+            for (c_idx = 0; c_idx < 868; c_idx = c_idx + 1) begin
+                assert_cond(tx_hw === 1'b0, "HW Baud Frame 1: Start bit line level must be 0");
+                @(negedge clk);
+            end
+
+            // 8 Data bits: 868 clock cycles each, sample at midpoint 434
+            rx_payload = 8'h00;
+            for (b_idx = 0; b_idx < 8; b_idx = b_idx + 1) begin
+                for (c_idx = 0; c_idx < 868; c_idx = c_idx + 1) begin
+                    if (c_idx == 434) rx_payload[b_idx] = tx_hw;
+                    @(negedge clk);
+                end
+            end
+            assert_cond(rx_payload === 8'hA5, "HW Baud Frame 1: Serial data matches expected 0xA5");
+
+            // Parity bit: Odd parity of 0xA5 (4 ones -> parity bit = 1)
+            for (c_idx = 0; c_idx < 868; c_idx = c_idx + 1) begin
+                if (c_idx == 434) rx_parity = tx_hw;
+                @(negedge clk);
+            end
+            assert_cond(rx_parity === 1'b1, "HW Baud Frame 1: Odd parity bit verified as 1");
+
+            // Stop bit: 868 clock cycles of 1
+            for (c_idx = 0; c_idx < 868; c_idx = c_idx + 1) begin
+                assert_cond(tx_hw === 1'b1, "HW Baud Frame 1: Stop bit line level must be 1");
+                @(negedge clk);
+            end
+
+            assert_cond(tx_done_hw === 1'b1, "HW Baud Frame 1: tx_done asserted at frame completion");
+            assert_cond(tx_busy_hw === 1'b0, "HW Baud Frame 1: tx_busy deasserted at frame completion");
+
+            // Frame 2: 0x5A with Even Parity (complementary bit toggle)
+            @(negedge clk);
+            din_hw = 8'h5A;
+            parity_mode_hw = 2'b10; // Even parity
+            tx_start_hw = 1'b1;
+
+            @(negedge clk);
+            tx_start_hw = 1'b0;
+
+            assert_cond(tx_busy_hw === 1'b1, "HW Baud Frame 2: tx_busy asserts immediately on start");
+
+            // Start bit
+            for (c_idx = 0; c_idx < 868; c_idx = c_idx + 1) begin
+                assert_cond(tx_hw === 1'b0, "HW Baud Frame 2: Start bit line level must be 0");
+                @(negedge clk);
+            end
+
+            // 8 Data bits
+            rx_payload = 8'h00;
+            for (b_idx = 0; b_idx < 8; b_idx = b_idx + 1) begin
+                for (c_idx = 0; c_idx < 868; c_idx = c_idx + 1) begin
+                    if (c_idx == 434) rx_payload[b_idx] = tx_hw;
+                    @(negedge clk);
+                end
+            end
+            assert_cond(rx_payload === 8'h5A, "HW Baud Frame 2: Serial data matches expected 0x5A");
+
+            // Parity bit: Even parity of 0x5A (4 ones -> parity bit = 0)
+            for (c_idx = 0; c_idx < 868; c_idx = c_idx + 1) begin
+                if (c_idx == 434) rx_parity = tx_hw;
+                @(negedge clk);
+            end
+            assert_cond(rx_parity === 1'b0, "HW Baud Frame 2: Even parity bit verified as 0");
+
+            // Stop bit
+            for (c_idx = 0; c_idx < 868; c_idx = c_idx + 1) begin
+                assert_cond(tx_hw === 1'b1, "HW Baud Frame 2: Stop bit line level must be 1");
+                @(negedge clk);
+            end
+
+            assert_cond(tx_done_hw === 1'b1, "HW Baud Frame 2: tx_done asserted at frame completion");
+            assert_cond(tx_busy_hw === 1'b0, "HW Baud Frame 2: tx_busy deasserted at frame completion");
+
+            @(negedge clk);
+            din_hw = 8'h00;
+            parity_mode_hw = 2'b00;
+
+            cov_hw_baud = 1;
+            $display("[PASS] Real hardware 115,200 baud frames verified cycle-accurately (17,360 clock cycles).");
+        end
+    endtask
+
     // Main Test Execution
     integer i;
     integer covered_bins;
@@ -489,11 +624,22 @@ module tb_uart_tx();
         end
         cov_random_frames = 1;
 
+        // 10. Real-World Hardware 115,200 Baud Verification
+        verify_hw_baud_115200();
+
+        // Exercise active-low reset assertion & recovery for complete toggle verification
+        @(negedge clk);
+        rst_n = 1'b0;
+        #(CLK_PERIOD * 2);
+        @(negedge clk);
+        rst_n = 1'b1;
+        #(CLK_PERIOD * 2);
+
         // =====================================================================
         // FUNCTIONAL COVERAGE AUDIT & REPORTING
         // =====================================================================
         covered_bins = 0;
-        total_bins = 30;
+        total_bins = 31;
 
         // Parity modes (4)
         if (cov_mode_none > 0)     covered_bins = covered_bins + 1;
@@ -536,6 +682,9 @@ module tb_uart_tx();
         // Random stress (1)
         if (cov_random_frames > 0) covered_bins = covered_bins + 1;
 
+        // Hardware Baud (1)
+        if (cov_hw_baud > 0) covered_bins = covered_bins + 1;
+
         cov_percentage = (covered_bins * 100.0) / total_bins;
 
         $display("\n==================================================");
@@ -557,6 +706,7 @@ module tb_uart_tx();
         $display("[COV_DETAIL]  Inter-Frame Gaps : Delay0(1-clk)=%0d, Delay3(4-clk)=%0d, Delay7(8-clk)=%0d (3/3 hit)",
                  cov_gap_delay0, cov_gap_delay3, cov_gap_delay7);
         $display("[COV_DETAIL]  Random Suite     : 30 Frames completed (%0d) (1/1 hit)", cov_random_frames);
+        $display("[COV_DETAIL]  Hardware Baud    : 115,200 Baud verified (%0d) (1/1 hit)", cov_hw_baud);
 
         if (covered_bins == total_bins) begin
             $display("[COV_UNCOVERED] None (100.0%% Coverage Achieved)");

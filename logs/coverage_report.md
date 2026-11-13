@@ -9,9 +9,9 @@
 
 ## 1. Executive Regression Coverage Summary
 
-- **Total Functional Coverage:** **`100.0%`** (118 / 118 Bins Covered)
-- **Total Assertions / Checks Executed:** **`22,059`**
-- **Passed Checks:** **`22,059`** (100.0%)
+- **Total Functional Coverage:** **`100.0%`** (119 / 119 Bins Covered)
+- **Total Assertions / Checks Executed:** **`25,624`**
+- **Passed Checks:** **`25,624`** (100.0%)
 - **Failed Checks:** **`0`** (0.0%)
 - **Status:** **🟢 ALL COVERAGE GOALS MET (0 Uncovered Bins)**
 
@@ -22,8 +22,8 @@
 | Module | Status | Total Checks | Passed Checks | Failed Checks | Coverage Bins | Covered Bins | Coverage % | Uncovered Bins |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
 | **alu** | ✅ PASSED | 1,917 | 1,917 | 0 | 42 | 42 | **100.0%** | None (100.0% Coverage Achieved) |
-| **sync_fifo** | ✅ PASSED | 13,407 | 13,407 | 0 | 46 | 46 | **100.0%** | None (100.0% Coverage Achieved) |
-| **uart_tx** | ✅ PASSED | 6,735 | 6,735 | 0 | 30 | 30 | **100.0%** | None (100.0% Coverage Achieved) |
+| **sync_fifo** | ✅ PASSED | 13,490 | 13,490 | 0 | 46 | 46 | **100.0%** | None (100.0% Coverage Achieved) |
+| **uart_tx** | ✅ PASSED | 10,217 | 10,217 | 0 | 31 | 31 | **100.0%** | None (100.0% Coverage Achieved) |
 
 ---
 
@@ -50,14 +50,14 @@
 ### 3.2 `sync_fifo.v` Coverage Breakdown
 
 - **Coverage Summary:** `46 / 46` bins hit (100.0%)
-- **Assertion Checks:** `13,407 / 13,407` passed
+- **Assertion Checks:** `13,490 / 13,490` passed
 
 | Coverage Domain / Category | Detailed Measurements & Bins Exercised |
 | :--- | :--- |
 | **Depths Tested** | D=1 (1), D=5 (1), D=16 (1) (3/3 hit) |
-| **Occupancy D=1** | Empty=1305, Full=6 (2/2 hit) |
-| **Occupancy D=5** | Empty=1259, 1-item=16, Inter=26, 4-item=6, Full=4 (5/5 hit) |
-| **Occupancy D=16** | Empty=179, 1-item=200, Inter=916, 15-item=10, Full=6 (5/5 hit) |
+| **Occupancy D=1** | Empty=1312, Full=8 (2/2 hit) |
+| **Occupancy D=5** | Empty=1268, 1-item=16, Inter=26, 4-item=6, Full=4 (5/5 hit) |
+| **Occupancy D=16** | Empty=188, 1-item=200, Inter=916, 15-item=10, Full=6 (5/5 hit) |
 | **Op Modes D=1** | WR=2, RD=2, Simul=2 (3/3 hit) |
 | **Op Modes D=5** | WR=14, RD=14, Simul=3 (3/3 hit) |
 | **Op Modes D=16** | WR=172, RD=185, Simul=131 (3/3 hit) |
@@ -68,8 +68,8 @@
 
 ### 3.3 `uart_tx.v` Coverage Breakdown
 
-- **Coverage Summary:** `30 / 30` bins hit (100.0%)
-- **Assertion Checks:** `6,735 / 6,735` passed
+- **Coverage Summary:** `31 / 31` bins hit (100.0%)
+- **Assertion Checks:** `10,217 / 10,217` passed
 
 | Coverage Domain / Category | Detailed Measurements & Bins Exercised |
 | :--- | :--- |
@@ -81,4 +81,5 @@
 | **Handshake Pulse** | BusyAssert=52, Exact1Pulse=52, ImmLowNext=1 (3/3 hit) |
 | **Inter-Frame Gaps** | Delay0(1-clk)=1, Delay3(4-clk)=1, Delay7(8-clk)=1 (3/3 hit) |
 | **Random Suite** | 30 Frames completed (1) (1/1 hit) |
+| **Hardware Baud** | 115,200 Baud verified (1) (1/1 hit) |
 
