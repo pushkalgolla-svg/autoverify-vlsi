@@ -9,7 +9,7 @@ on:
 
 jobs:
   rtl-verification:
-    name: AutoVerify-VLSI Regression
+    name: AutoVerify-VLSI Regression & Coverage
     runs-on: ubuntu-latest
 
     steps:
@@ -31,17 +31,24 @@ jobs:
           iverilog -V
           vvp -V
 
-      - name: Run Full RTL Regression Suite (Offline / No-AI)
+      - name: Run Full RTL Regression & Functional Coverage Suite (Offline / No-AI)
         run: |
           python scripts/verify.py --regression --no-ai
 
-      - name: Upload Regression Dashboard and Waveforms
+      - name: Run Isolated AI Self-Healing Workflow Demonstration (Offline)
+        run: |
+          python scripts/demo_ai_healing.py --offline
+
+      - name: Upload Regression Dashboard, Coverage & Waveforms
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: regression-artifacts
+          name: regression-and-coverage-artifacts
           path: |
             logs/regression_dashboard.md
             logs/regression_dashboard.html
+            logs/coverage_report.md
             logs/*_sim.log
             logs/*.vcd
+            examples/faulty_rtl/alu_healing_report.md
+            examples/faulty_rtl/alu_healing_patch.diff

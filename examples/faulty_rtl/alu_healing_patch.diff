@@ -1,0 +1,24 @@
+--- a/alu_faulty.v
++++ b/alu_candidate.v
+@@ -1,9 +1,9 @@
+ `timescale 1ns / 1ps
+ 
+ /**
+- * DELIBERATELY FAULTY Parameterized ALU (Demonstration Copy)
+- * Injected Defect: Inverted subtraction borrow condition on line 34:
+- *   carry = (a > b); // BUG: Inverted logic, causes borrow flag failure when a < b
++ * Corrected Parameterized ALU (Demonstration Candidate)
++ * Fix: Standardized subtraction borrow condition:
++ *   carry = (a < b); // Borrow flag: 1 if unsigned underflow (a < b)
+  */
+ 
+ module alu #(
+@@ -24,7 +24,7 @@
+             2'b00: {carry, result} = a + b;
+             2'b01: begin
+                 result = a - b;
+-                carry  = (a > b); // INJECTED DEFECT: Inverted comparison condition!
++                carry  = (a < b); // Explicit borrow indicator: 1 if underflow (a < b)
+             end
+             2'b10: result = a & b;
+             2'b11: result = a | b;
