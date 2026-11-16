@@ -1,5 +1,6 @@
 # AutoVerify-VLSI: Automated RTL Verification & Self-Healing Framework
 
+[![Interactive Web Demo](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://share.streamlit.io/)
 [![RTL Verification Regression](https://github.com/pushkalgolla-svg/autoverify-vlsi/actions/workflows/verify.yml/badge.svg)](https://github.com/pushkalgolla-svg/autoverify-vlsi/actions/workflows/verify.yml)
 
 AutoVerify-VLSI is an automated digital design verification and diagnostic framework that bridges open-source electronic design automation (EDA) tools—**Icarus Verilog (`iverilog`)**, **VVP**, and **GTKWave**—with optional LLM orchestration using the **Google Gemini API**.
@@ -11,6 +12,24 @@ The framework provides robust, self-checking directed and constrained-random tes
 
 ---
 
+
+## 🌐 Interactive Web Studio & Diagnostic Runner
+
+An interactive verification studio is included with the project, allowing you to test the regression suites across all 3 IP cores (ALU, FIFO, UART), toggle between golden and faulty RTL to inspect assertion failure traces, and visualize functional/toggle coverage closures in real time.
+
+### Option 1: Launch Streamlit Studio
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Launch interactive web studio
+streamlit run app.py
+```
+
+### Option 2: Standalone Web Dashboard (Browser / Vercel)
+Open `index.html` directly in any modern browser, or deploy to Vercel/GitHub Pages with zero build steps.
+
+---
 ## 📦 Verified RTL Cores & Coverage Overview
 
 | IP Module | Location | Testbench | Assertion Checks | Functional Coverage | Reachable Toggle Cov | Key Verification Scope |
@@ -146,3 +165,8 @@ flowchart TD
     K --> S["Automated Dashboard & Coverage Report<br/>(logs/regression_dashboard.html/md, coverage_report.md)"]
     L --> S
 ```
+
+---
+
+## 👤 Author
+**Pushkal Golla** — [GitHub](https://github.com/pushkalgolla-svg) • [LinkedIn](https://www.linkedin.com/in/pushkal-golla/)
